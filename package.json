@@ -2,7 +2,7 @@
   "name": "dsh-plugin-cocos-mcp",
   "version": "1.0.0",
   "description": "Drive a live Cocos Creator 3.8.x editor from AI agents via MCP. Reverse-engineered from Cocos Creator's own 3.8.8 editor contract: 111 verified editor messages, zero-dependency stdio server, editor bridge with undo-journal transactions, and an offline prefab/animation editor.",
-  "author": "VberAI Internal",
+  "author": "侯涛",
   "license": "MIT",
   "bin": {
     "cocos-mcp": "./hub/bin.js"
@@ -20,7 +20,11 @@
     "hub/",
     "extension/",
     "scripts/",
-    "README.md"
+    "research/",
+    "README.md",
+    "SOURCES.md",
+    "NOTICE",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"
