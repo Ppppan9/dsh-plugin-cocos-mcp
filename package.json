@@ -1,7 +1,7 @@
 {
-  "name": "cocos-mcp",
+  "name": "dsh-plugin-cocos-mcp",
   "version": "1.0.0",
-  "description": "Cocos Creator 3.8.x 的 MCP（Model Context Protocol）服务：编辑器侧 Bridge + stdio 网关 + 离线 prefab/animation 编辑器 + 知识库",
+  "description": "Drive a live Cocos Creator 3.8.x editor from AI agents via MCP. Reverse-engineered from Cocos Creator's own 3.8.8 editor contract: 111 verified editor messages, zero-dependency stdio server, editor bridge with undo-journal transactions, and an offline prefab/animation editor.",
   "author": "VberAI Internal",
   "license": "MIT",
   "bin": {
@@ -26,13 +26,22 @@
     "node": ">=18"
   },
   "keywords": [
+    "dsh",
+    "deepseek-harness",
     "cocos",
     "cocos-creator",
-    "mcp",
-    "model-context-protocol",
     "game-engine",
-    "ai"
+    "mcp",
+    "modelcontextprotocol",
+    "ai-tools",
+    "ai-agent",
+    "reverse-engineering"
   ],
   "dependencies": {},
-  "devDependencies": {}
+  "devDependencies": {},
+  "homepage": "https://github.com/Ppppan9/dsh-plugin-cocos-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ppppan9/dsh-plugin-cocos-mcp.git"
+  }
 }
