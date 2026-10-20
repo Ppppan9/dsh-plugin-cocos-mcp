@@ -104,7 +104,9 @@ class McpClient {
     /** 调用工具，返回解析后的 content 文本。 */
     async callTool(name, args) {
         const res = await this.request('tools/call', { name, arguments: args || {} });
-        if (res.error) throw new Error(res.error.message);
+        // 协议级错误（未知工具 / 参数非法）按 MCP 规范走 JSON-RPC error，
+        // 工具执行错误走 isError + content。两种都表示「这次调用失败了」。
+        if (res.error) return { isError: true, text: res.error.message, protocolError: true };
         const text = (res.result.content || []).map((c) => c.text).join('\n');
         let data;
         try {

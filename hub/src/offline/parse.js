@@ -429,12 +429,18 @@ function loadAnim(filePath) {
         channels.push({
           index: ci,
           channel: ch,
-          path: ch ? channelPath(ch) : '',
+          // 路径在 track 元素上，不在 channel 引用上
+          path: channelPath(el) || (ch ? channelPath(ch) : ''),
           element: el,
         });
       });
     } else if (isPlainObject(el._channel)) {
-      channels.push({ index: 0, channel: el._channel, path: channelPath(el._channel), element: el });
+      channels.push({
+        index: 0,
+        channel: el._channel,
+        path: channelPath(el) || channelPath(el._channel),
+        element: el,
+      });
     } else if (typeof el.path === 'string' || typeof el._path === 'string') {
       // Cocos 真实 .anim 形态：track 元素本身就是 cc.CurveChannel
       // （带 path + curve），既没有 _channels 也没有 _channel。

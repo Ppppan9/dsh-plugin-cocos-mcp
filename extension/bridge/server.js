@@ -20,7 +20,7 @@ const crypto = require('crypto');
  */
 
 const MAX_BODY = 4 * 1024 * 1024;
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
 function timingSafeEqualStr(a, b) {
     const ba = Buffer.from(String(a));
@@ -31,8 +31,20 @@ function timingSafeEqualStr(a, b) {
 
 function isLoopbackHost(hostHeader) {
     if (!hostHeader) return false;
-    // 去掉端口
-    const h = String(hostHeader).replace(/:\d+$/, '');
+    const raw = String(hostHeader).trim();
+    // IPv6 字面量：[::1]:7523 → ::1
+    if (raw.startsWith('[')) {
+        const end = raw.indexOf(']');
+        if (end < 0) return false;
+        return LOOPBACK_HOSTS.has(raw.slice(1, end));
+    }
+    // 裸 IPv6（无端口）：::1 —— 不能直接 replace(/:\d+$/)，
+    // 那会把 "::1" 剥成 ":"，导致 IPv6 loopback 被误拒。
+    if ((raw.match(/:/g) || []).length > 1) {
+        return LOOPBACK_HOSTS.has(raw);
+    }
+    // host:port
+    const h = raw.replace(/:\d+$/, '');
     return LOOPBACK_HOSTS.has(h);
 }
 
@@ -119,7 +131,23 @@ async function createBridge(opts) {
         try {
             body = await readBody(req);
         } catch (err) {
-            return json(res, err.code === 'BODY_TOO_LARGE' ? 413 : 400, {
+            // ⚠️ 超限时 readBody 已经 destroy 了连接 —— 这时再写 413 客户端也收不到
+            //    （实测拿到的是 EPIPE）。所以先把 413 响应写出去，再让它断开。
+            if (err.code === 'BODY_TOO_LARGE') {
+                try {
+                    res.writeHead(413, { 'Content-Type': 'application/json' });
+                    res.end(
+                        JSON.stringify({
+                            jsonrpc: '2.0',
+                            error: { code: -32700, message: err.message },
+                        })
+                    );
+                } catch (_) {
+                    /* ignore */
+                }
+                return;
+            }
+            return json(res, 400, {
                 jsonrpc: '2.0',
                 error: { code: -32700, message: err.message },
             });
@@ -216,8 +244,36 @@ async function createBridge(opts) {
     return {
         port: actualPort,
         url: `http://127.0.0.1:${actualPort}/bridge`,
+        /**
+         * 关闭服务。
+         *
+         * ⚠️ 必须加超时兜底：Node 的 server.close(cb) 会**等所有连接关闭**才回调。
+         * 只要有一个 HTTP 请求还挂着（例如 builder:add-task 在等整个构建结束），
+         * close() 永不返回 → exports.unload() 永不 resolve → Cocos 的「禁用扩展」卡死。
+         */
         async close() {
-            await new Promise((resolve) => server.close(() => resolve()));
+            await new Promise((resolve) => {
+                let done = false;
+                const finish = () => {
+                    if (done) return;
+                    done = true;
+                    resolve();
+                };
+                const timer = setTimeout(finish, 1500);
+                if (timer.unref) timer.unref();
+                server.close(() => {
+                    clearTimeout(timer);
+                    finish();
+                });
+                // Node ≥18.2：强制断开还在 keep-alive 的连接
+                if (typeof server.closeAllConnections === 'function') {
+                    try {
+                        server.closeAllConnections();
+                    } catch (_) {
+                        /* ignore */
+                    }
+                }
+            });
         },
     };
 }

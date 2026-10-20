@@ -9,8 +9,11 @@ const http = require('http');
  * 没有额外收益，而且原生 http 更容易精确控制超时与连接复用。
  */
 
-const DEFAULT_TIMEOUT_MS = 45000;
-const LONG_OP_TIMEOUT_MS = 120000;
+const DEFAULT_TIMEOUT_MS = 60000;
+// 长任务（构建等）用的超时
+const LONG_OP_TIMEOUT_MS = 600000;
+// 响应体上限：防止大场景/大资源库把内存吃光
+const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 
 class BridgeError extends Error {
     constructor(message, code) {
@@ -31,6 +34,15 @@ class EditorClient {
         this.shortName = entry.shortName;
         this.projectPath = entry.projectPath;
         this._seq = 0;
+    }
+
+    /** 同步最新注册信息（扩展重启 Bridge 会换 url/token，pid 不变）。 */
+    sync(entry) {
+        this.entry = entry;
+        if (entry.url) this.url = entry.url;
+        if (entry.token) this.token = entry.token;
+        if (entry.shortName) this.shortName = entry.shortName;
+        if (entry.projectPath) this.projectPath = entry.projectPath;
     }
 
     /**
@@ -96,6 +108,7 @@ class EditorClient {
     _request(body, timeoutMs) {
         return new Promise((resolve, reject) => {
             const u = new URL(this.url);
+            const limit = MAX_RESPONSE_BYTES;
             const req = http.request(
                 {
                     hostname: u.hostname,
@@ -111,7 +124,23 @@ class EditorClient {
                 },
                 (res) => {
                     const chunks = [];
-                    res.on('data', (c) => chunks.push(c));
+                    let size = 0;
+                    res.on('data', (c) => {
+                        size += c.length;
+                        // 响应体无上限地全量拼进内存 → 大场景的 scene.tree / 大库的 asset.query
+                        // 能把 hub 的内存吃光。超限就断开并报错。
+                        if (size > limit) {
+                            req.destroy(
+                                new BridgeError(
+                                    `编辑器响应超过 ${Math.round(limit / 1048576)}MB 上限（已收 ${size} 字节），已中止。` +
+                                    '试试缩小查询范围（如给 scene.tree 加 maxDepth）。',
+                                    'RESPONSE_TOO_LARGE'
+                                )
+                            );
+                            return;
+                        }
+                        chunks.push(c);
+                    });
                     res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
                 }
             );
@@ -125,4 +154,4 @@ class EditorClient {
     }
 }
 
-module.exports = { EditorClient, BridgeError, DEFAULT_TIMEOUT_MS, LONG_OP_TIMEOUT_MS };
+module.exports = { EditorClient, BridgeError, DEFAULT_TIMEOUT_MS, LONG_OP_TIMEOUT_MS, MAX_RESPONSE_BYTES };

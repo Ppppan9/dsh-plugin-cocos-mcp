@@ -25,16 +25,16 @@ const REGISTRY_DIR = path.join(os.homedir(), '.cocos-mcp', 'editors');
 const STALE_MS = 120000;
 const SCAN_INTERVAL_MS = 15000;
 
-function readAll() {
+function readAll(dir = REGISTRY_DIR) {
     let files = [];
     try {
-        files = fs.readdirSync(REGISTRY_DIR).filter((f) => f.endsWith('.json'));
+        files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
     } catch (_) {
         return [];
     }
     const out = [];
     for (const f of files) {
-        const full = path.join(REGISTRY_DIR, f);
+        const full = path.join(dir, f);
         try {
             const stat = fs.statSync(full);
             const data = JSON.parse(fs.readFileSync(full, 'utf8'));
@@ -68,7 +68,7 @@ function isLoopbackUrl(url) {
 /**
  * 校验一条注册记录。任何一项不通过就整条丢弃（而不是保留一个坏实例）。
  */
-function validate(entry, now = Date.now()) {
+function validate(entry, now = Date.now(), staleMs = STALE_MS) {
     const reasons = [];
     if (!entry || typeof entry !== 'object') reasons.push('记录不是对象');
     else {
@@ -78,7 +78,7 @@ function validate(entry, now = Date.now()) {
         if (!isPidAlive(entry.pid)) reasons.push('进程已退出');
         const ts = Number(entry.ts) || 0;
         if (!ts) reasons.push('缺少心跳时间戳');
-        else if (now - ts > STALE_MS) reasons.push(`心跳超时（${Math.round((now - ts) / 1000)}s）`);
+        else if (now - ts > staleMs) reasons.push(`心跳超时（${Math.round((now - ts) / 1000)}s）`);
     }
     return { ok: reasons.length === 0, reasons };
 }
@@ -141,6 +141,11 @@ class EditorRegistry {
 
     onChange(fn) {
         this._listeners.push(fn);
+        // 返回退订函数，避免长跑进程里监听器只增不减
+        return () => {
+            const i = this._listeners.indexOf(fn);
+            if (i >= 0) this._listeners.splice(i, 1);
+        };
     }
 
     _emit() {
@@ -161,11 +166,11 @@ class EditorRegistry {
      */
     scan() {
         const now = Date.now();
-        const raw = readAll();
+        const raw = readAll(this.dir);
         const valid = [];
         let reaped = 0;
         for (const e of raw) {
-            const v = validate(e, now);
+            const v = validate(e, now, this.staleMs);
             if (v.ok) {
                 valid.push(e);
                 continue;

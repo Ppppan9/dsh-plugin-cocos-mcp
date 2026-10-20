@@ -38,22 +38,33 @@ const INSTRUCTIONS = `Cocos Creator 3.8.x 的 MCP 服务。
 【重要边界】
 - 本服务只调用经 Cocos Creator 3.8.8 真机验证存在的编辑器消息，调用不存在的消息会被直接拒绝并给出正确替代。
 - 破坏性操作（删节点/删资源/摘组件）必须在同一次调用里显式传 confirm=true。
-- 不提供任意脚本执行通道：只能调用本工具列表里的固定能力。`;
+- **不提供「通用 eval」**：没有 \`new Function(code)\` 这类通用执行入口。
+  但要知道：\`cocos_message\` + \`confirm=true\` 可以触达白名单里的
+  \`scene:execute-scene-script\` / \`scene:execute-component-method\`，
+  它们能调用扩展脚本与组件方法 —— 这是**受控但真实存在**的执行面，用之前请确认清楚。`;
 
 function makeClientFactory(registry) {
     const cache = new Map();
-    return (entry) => {
+    const factory = (entry) => {
         const key = `${entry.pid}:${entry.url}`;
         let c = cache.get(key);
         if (!c) {
             c = new EditorClient(entry);
             cache.set(key, c);
         }
-        // token 可能随扩展重启变化 → 同步最新值
-        c.token = entry.token;
-        c.entry = entry;
+        // 扩展「重启 Bridge」会换 url 与 token（pid 不变）→ 必须同步，
+        // 否则之后每次调用都拿着旧 token 打新端口。
+        c.sync(entry);
         return c;
     };
+    // 淘汰已经消失的实例对应的 client（否则长跑进程会缓慢增长）
+    factory.evictStale = () => {
+        const live = new Set(registry.list().map((e) => `${e.pid}:${e.url}`));
+        for (const key of [...cache.keys()]) {
+            if (!live.has(key)) cache.delete(key);
+        }
+    };
+    return factory;
 }
 
 async function main() {
@@ -113,14 +124,21 @@ async function main() {
     });
 
     // 编辑器实例数量变化 → 工具清单变化 → 通知客户端
-    let lastEditorCount = registry.list().length;
+    // 比较**短名集合**而不是数量 —— 同名项目去重改名时数量不变，但工具名前缀变了，
+    // 客户端手里的工具名会全是旧的。
+    let lastShortNames = registry.list().map((e) => e.shortName).sort().join('|');
     registry.onChange((editors) => {
-        if (editors.length !== lastEditorCount) {
-            lastEditorCount = editors.length;
+        const now = editors.map((e) => e.shortName).sort().join('|');
+        if (now !== lastShortNames) {
+            lastShortNames = now;
             server.notifyToolListChanged();
             server.notifyResourceListChanged();
         }
     });
+
+    // 定期淘汰失效的 client（扩展重启 Bridge 后旧 entry 不会消失）
+    const evictTimer = setInterval(() => getClient.evictStale && getClient.evictStale(), 30000);
+    if (evictTimer.unref) evictTimer.unref();
 
     server.start();
 
@@ -163,10 +181,12 @@ function listResources(registry) {
         { uri: 'cocos://knowledge/all', name: 'Cocos 知识库', description: '组件属性表 / 坐标系 / 布局配方 / 踩坑清单', mimeType: 'application/json' },
     ];
     for (const e of editors) {
-        const p = `${e.shortName}__`;
+        // 用 `cocos://editor/<短名>/...` 而不是 `<短名>__`：
+        // 短名来自目录名，可能含下划线，`__` 分隔会产生歧义（解析不出正确的短名）。
+        const seg = encodeURIComponent(e.shortName);
         out.push(
-            { uri: `cocos://${p}project/info`, name: `${e.shortName} 项目信息`, description: '项目路径、uuid、编辑器版本', mimeType: 'application/json' },
-            { uri: `cocos://${p}scene/tree`, name: `${e.shortName} 场景节点树`, description: '当前场景的完整节点树', mimeType: 'application/json' }
+            { uri: `cocos://editor/${seg}/project/info`, name: `${e.shortName} 项目信息`, description: '项目路径、uuid、编辑器版本', mimeType: 'application/json' },
+            { uri: `cocos://editor/${seg}/scene/tree`, name: `${e.shortName} 场景节点树`, description: '当前场景的完整节点树', mimeType: 'application/json' }
         );
     }
     return out;
@@ -181,9 +201,11 @@ async function readResource(registry, getClient, uri) {
     if (uri === 'cocos://knowledge/all') {
         return json(require('./src/knowledge/cocos-knowledge.json'));
     }
-    const m = /^cocos:\/\/([^_]+(?:_[^_]+)*?)__(.+)$/.exec(uri);
+    // 固定前缀 + 明确分隔，短名含下划线也不会歧义
+    const m = /^cocos:\/\/editor\/([^/]+)\/(.+)$/.exec(uri);
     if (m) {
-        const [, shortName, rest] = m;
+        const shortName = decodeURIComponent(m[1]);
+        const rest = m[2];
         const entry = registry.list().find((e) => e.shortName === shortName);
         if (!entry) throw new Error(`没有名为 "${shortName}" 的编辑器实例`);
         const client = getClient(entry);
@@ -193,6 +215,7 @@ async function readResource(registry, getClient, uri) {
         if (rest === 'scene/tree') {
             return json(await client.invoke('scene.tree', {}));
         }
+        throw new Error(`未知的 resource 子路径: ${rest}`);
     }
     throw new Error(`未知的 resource uri: ${uri}`);
 }

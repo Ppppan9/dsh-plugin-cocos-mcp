@@ -124,12 +124,41 @@ function metaPathFor(filePath) {
 }
 
 /**
- * 生成 .meta 内容（Cocos 3.x prefab importer 形态）。
+ * 按扩展名推导 Cocos 的 importer。
+ * 之前一律写 'prefab' —— 给 .ts 脚本写 importer:"prefab" 会让 Cocos
+ * 用 prefab 导入器去解析脚本，该脚本彻底无法编译。
+ */
+function importerForPath(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.ts':
+    case '.js':
+      return 'typescript';
+    case '.json':
+      return 'json';
+    case '.scene':
+      return 'scene';
+    case '.png':
+    case '.jpg':
+    case '.jpeg':
+      return 'texture';
+    case '.mp3':
+    case '.wav':
+      return 'audio-clip';
+    case '.mp4':
+      return 'video-clip';
+    default:
+      return 'prefab';
+  }
+}
+
+/**
+ * 生成 .meta 内容（Cocos 3.x importer 形态）。
  */
 function buildMetaContent(filePath, options) {
   const opts = options || {};
   const uuid = opts.uuid || deterministicUuid(`meta:${path.resolve(filePath)}`);
-  const importer = opts.importer || 'prefab';
+  const importer = opts.importer || importerForPath(filePath);
   const meta = {
     ver: '1.1.0',
     importer,
@@ -144,14 +173,58 @@ function buildMetaContent(filePath, options) {
 
 /**
  * 准备一个 .meta 写入计划（不落盘）。
- * 返回 { path, content, existed, backupContent }
+ * 返回 { path, content, existed, backupContent, uuid, skipped }
+ *
+ * ⚠️ **已有 .meta 时必须保留原 uuid 与原 importer**：
+ * .meta 的 uuid 是资产主键，改了它，prefab / 场景里所有对该资产的引用
+ * 全部断链（编辑器里变成粉红丢失引用）。所以：
+ *   - 已有 .meta + 没显式给 uuid → 沿用旧 uuid
+ *   - 已有 .meta + 没显式给 importer → 沿用旧 importer
+ *   - 已有 .meta + 内容完全一致 → skipped（不写）
  */
 function planMetaWrite(filePath, options) {
   const metaPath = metaPathFor(filePath);
   const existed = fs.existsSync(metaPath);
   const backupContent = existed ? fs.readFileSync(metaPath, 'utf8') : null;
-  const content = buildMetaContent(filePath, options);
-  return { path: metaPath, content, existed, backupContent };
+
+  let prevUuid = null;
+  let prevImporter = null;
+  if (existed) {
+    try {
+      const prev = JSON.parse(backupContent);
+      if (prev && typeof prev.uuid === 'string') prevUuid = prev.uuid;
+      if (prev && typeof prev.importer === 'string') prevImporter = prev.importer;
+    } catch (_) {
+      /* 旧 .meta 解析失败 → 按新建处理 */
+    }
+  }
+
+  const opts = options || {};
+  const uuid = opts.uuid || prevUuid || deterministicUuid(`meta:${path.resolve(filePath)}`);
+  const importer = opts.importer || prevImporter || importerForPath(filePath);
+
+  // ⚠️ 已有 .meta 时**只补/改 uuid 与 importer，其余字段原样保留**。
+  //   直接用 buildMetaContent 重建会把 files / subMetas / userData 全清空 ——
+  //   subMetas 存着 SpriteFrame 等子元数据，清了纹理就失去所有子资源引用。
+  if (existed) {
+    let prev = null;
+    try {
+      prev = JSON.parse(backupContent);
+    } catch (_) {
+      prev = null;
+    }
+    if (prev && typeof prev === 'object' && !Array.isArray(prev)) {
+      const merged = { ...prev, uuid, importer };
+      const content = `${JSON.stringify(merged, null, 2)}\n`;
+      if (backupContent === content) {
+        return { path: metaPath, content, existed, backupContent, uuid, skipped: true };
+      }
+      return { path: metaPath, content, existed, backupContent, uuid, skipped: false };
+    }
+  }
+
+  const content = buildMetaContent(filePath, { ...opts, uuid, importer });
+  return { path: metaPath, content, existed, backupContent, uuid, skipped: false };
 }
 
 /**
@@ -214,6 +287,7 @@ function listFilesRecursive(dir, options) {
 }
 
 module.exports = {
+  importerForPath,
   readTextFile,
   parseJsonText,
   detectFormat,

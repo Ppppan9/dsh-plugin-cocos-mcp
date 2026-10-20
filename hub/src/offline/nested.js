@@ -28,6 +28,8 @@ const {
   isIndexSegment,
   normalizePropertyPath,
   displayName,
+  getNodeLocalPos,
+  setNodeLocalPos,
 } = require('./parse');
 const { deterministicFileId, deterministicUuid } = require('./id');
 
@@ -94,27 +96,31 @@ function normalizeOverridePaths(ctx, instance) {
   return changed;
 }
 
-/** 按引擎规则重排 instance 的 propertyOverrides。 */
+/**
+ * 按引擎规则重排 instance 的 propertyOverrides。
+ *
+ * ⚠️ 这里曾经有个致命的不一致：`upsertOverride` 把新元素
+ *   `arr.splice(insertAt, 0, ...)` 插到数组第 insertAt 位，
+ *   却把 `overrideIndices.push(propIndex)` 追加到**末尾** ——
+ *   两个平行数组从此不再下标对齐。
+ *   而下面这段用 `arr[instance.overrideIndices.indexOf(ov.index)]`
+ *   去取元素，等于按错位的映射重排 —— 结果恰恰是
+ *   「单字段 override 排在数组字段之后」，正是引擎会静默跳过的顺序。
+ *
+ * 现在改成**单一真源**：`instance.overrides`（每项带 index），
+ * `propertyOverrides` 的引用顺序完全由它推导，不再维护平行数组。
+ */
 function reorderOverrides(ctx, instance) {
   const arr = instance.element.propertyOverrides;
   if (!Array.isArray(arr)) return false;
   const before = arr.map((r) => refId(r));
-  const sorted = sortOverrides(
-    instance.overrides.map((ov) => ({ ...ov, __ref: arr[instance.overrideIndices.indexOf(ov.index)] }))
-  );
-  const after = sorted.map((o) => o.__ref);
-  const changed = before.join(',') !== after.join(',');
+  const sorted = sortOverrides(instance.overrides.map((ov) => ({ ...ov })));
+  const after = sorted.map((o) => ({ __id__: o.index }));
+  const changed = before.join(',') !== after.map((r) => r.__id__).join(',');
   if (changed) {
     instance.element.propertyOverrides = after;
+    instance.overrides = sorted;
     instance.overrideIndices = sorted.map((o) => o.index);
-    instance.overrides = sorted.map((o) => ({
-      index: o.index,
-      element: o.element,
-      propertyPath: o.propertyPath,
-      value: o.value,
-      localID: o.localID,
-      targetIndex: o.targetIndex,
-    }));
   }
   return changed;
 }
@@ -205,8 +211,6 @@ function upsertOverride(ctx, instance, spec) {
     ? instance.element.propertyOverrides
     : (instance.element.propertyOverrides = []);
   const insertAt = findInsertIndex(instance.overrides, propertyPath);
-  arr.splice(insertAt, 0, { __id__: propIndex });
-
   const override = {
     index: propIndex,
     element: propInfo,
@@ -215,8 +219,12 @@ function upsertOverride(ctx, instance, spec) {
     localID,
     targetIndex,
   };
-  instance.overrideIndices.push(propIndex);
+  // ★ 两处必须用**同一个**插入位置：
+  //   arr（序列化引用）与 instance.overrides（内存真源）保持同序，
+  //   否则 reorderOverrides 会按错位的映射重排。
+  arr.splice(insertAt, 0, { __id__: propIndex });
   instance.overrides.splice(insertAt, 0, override);
+  instance.overrideIndices = instance.overrides.map((o) => o.index);
   return { created: true, override, index: propIndex };
 }
 
@@ -243,20 +251,29 @@ function removeOverrides(ctx, instance, filter) {
   }
   if (!removed.length) return removed;
   instance.element.propertyOverrides = keep.map((ov) => ({ __id__: ov.index }));
-  instance.overrideIndices = keep.map((ov) => ov.index);
   instance.overrides = keep;
+  instance.overrideIndices = keep.map((ov) => ov.index);
   return removed;
 }
 
-/** 确保 instance 有对应的 cc.TargetOverrideInfo 挂在宿主 PrefabInfo.targetOverrides 上。 */
-function ensureTargetOverride(ctx, instance) {
+/**
+ * 确保 instance 有对应的 cc.TargetOverrideInfo 挂在宿主 PrefabInfo.targetOverrides 上。
+ *
+ * @param {string[]} [localID] 本次 override 实际使用的 localID 链。
+ *   复用已有 TargetOverrideInfo **必须**比对链 —— 之前只要
+ *   「TargetInfo 没有 __id__ 且有 localID 数组」就复用，
+ *   而这恰恰是所有 TargetInfo 的形态 → 任何一条 override 都会挂到
+ *   一个指向别的 target 的 TargetOverrideInfo 下，引擎解析不到 → 编辑丢失。
+ */
+function ensureTargetOverride(ctx, instance, localID) {
   const pi = instance.prefabInfoIndex >= 0 ? ctx.prefabInfos.get(instance.prefabInfoIndex) : null;
   if (!pi) return null;
   const arr = Array.isArray(pi.element.targetOverrides)
     ? pi.element.targetOverrides
     : (pi.element.targetOverrides = []);
 
-  // 已存在指向该 instance 的 TargetOverrideInfo 就复用
+  const wantChain = Array.isArray(localID) ? localID.slice() : (instance.fileId ? [instance.fileId] : []);
+
   for (const r of arr) {
     const ri = refId(r);
     if (ri < 0) continue;
@@ -264,24 +281,27 @@ function ensureTargetOverride(ctx, instance) {
     if (!isPlainObject(el)) continue;
     if (typeOf(el) === 'cc.TargetOverrideInfo') {
       const ti = refId(el.targetInfo);
-      if (ti >= 0) {
-        const target = ctx.data[ti];
-        if (isPlainObject(target) && target.instanceIndex === instance.index) return el;
-        if (isPlainObject(target) && target.__id__ === undefined && Array.isArray(target.localID)) {
-          return el;
-        }
+      if (ti < 0) continue;
+      const target = ctx.data[ti];
+      if (!isPlainObject(target)) continue;
+      // 复用条件：localID 链**完全一致**
+      const existing = Array.isArray(target.localID) ? target.localID.slice() : [];
+      const sameChain = JSON.stringify(existing) === JSON.stringify(wantChain);
+      const sameInstance = target.instanceIndex === instance.index;
+      if (sameChain || (sameInstance && !existing.length)) {
+        return el;
       }
     }
   }
 
-  const localID = instance.fileId ? [instance.fileId] : [];
-  const targetInfo = { __type__: 'cc.TargetInfo', localID: localID.slice() };
+  const localID2 = wantChain.slice();
+  const targetInfo = { __type__: 'cc.TargetInfo', localID: localID2.slice() };
   const targetIndex = ctx.data.length;
   ctx.data.push(targetInfo);
   const toi = {
     __type__: 'cc.TargetOverrideInfo',
     targetInfo: { __id__: targetIndex },
-    localID: localID.slice(),
+    localID: localID2.slice(),
   };
   const toiIndex = ctx.data.length;
   ctx.data.push(toi);
@@ -311,7 +331,7 @@ function syncNestedRoots(ctx, nodeIndex) {
   for (const inst of targets) {
     const normalized = normalizeOverridePaths(ctx, inst);
     const reordered = reorderOverrides(ctx, inst);
-    const toi = ensureTargetOverride(ctx, inst);
+    const toi = ensureTargetOverride(ctx, inst, inst.fileId ? [inst.fileId] : []);
     results.push({
       instanceIndex: inst.index,
       fileId: inst.fileId,
@@ -349,7 +369,7 @@ function remapRefs(el, remap) {
  * 并建立 stub 节点 + cc.PrefabInstance + cc.PrefabInfo + _name override。
  */
 function inlineNestedPrefab(ctx, options) {
-  const { parentIndex, prefabPath, name, index } = options;
+  const { parentIndex, prefabPath, name, index, x, y } = options;
   if (!fs.existsSync(prefabPath)) {
     throw new Error(`嵌套 prefab 文件不存在：${prefabPath}`);
   }
@@ -436,8 +456,16 @@ function inlineNestedPrefab(ctx, options) {
   const instance = ctx.instances.get(instanceIndex);
   const realName = name || displayName(ctx, newRoot);
   if (instance) {
+    // 应用位置（之前 x/y 传进来但从来没被读过）
+    if (x !== undefined || y !== undefined) {
+      const el = ctx.data[newRoot];
+      if (isPlainObject(el)) {
+        const cur = getNodeLocalPos(el);
+        setNodeLocalPos(el, { x: x === undefined ? cur.x : Number(x), y: y === undefined ? cur.y : Number(y), z: cur.z });
+      }
+    }
     upsertOverride(ctx, instance, { localID: [instanceFileId], propertyPath: ['_name'], value: realName });
-    ensureTargetOverride(ctx, instance);
+    ensureTargetOverride(ctx, instance, instance.fileId ? [instance.fileId] : []);
   }
 
   return { nodeIndex: newRoot, instanceIndex, name: realName };

@@ -26,39 +26,55 @@ const {
     instanceForNode,
 } = require('./parse');
 const { readTextFile, parseJsonText, detectFormat, serializeJson, atomicWrite, planMetaWrite, commitPlans } = require('./write');
-const { OP_DEFS, ANIM_OPS, HANDLERS, validateOps, buildClassIdIndex, findProjectRoot, findNodeIndex, nodeComponents, splitPath, getPath } = require('./ops');
+const { OP_DEFS, HANDLERS, validateOps, buildClassIdIndex, findProjectRoot, findNodeIndex, nodeComponents, splitPath, getPath, assertOpPathAllowed } = require('./ops');
 const { ANIM_HANDLERS, ANIM_OP_DEFS, executeAnimOps } = require('./anim');
 const { compressUUID } = require('./id');
 
 function ok(data) {
     return { ok: true, data };
 }
+
+/** 护栏用的最小 ctx（只需要 allowedRoots）。 */
+function ctxForGuard(allowedRoots) {
+    return { allowedRoots };
+}
 function err(message) {
     return { ok: false, error: String(message && message.message ? message.message : message) };
 }
 
-/** 列出全部 op。 */
-function listOps() {
+/**
+ * 列出可用的 op。
+ * @param {string} [domain] 'prefab' | 'anim' | 不传=全部
+ *
+ * 每个 op 带 domain 标记 —— cocos_prefab_ops / cocos_anim_ops 两个工具
+ * 靠它分域，否则「prefab 工具却返回 anim op」这种描述与实现不符的问题
+ * 会被掩盖过去。
+ */
+function listOps(domain) {
     const out = [];
     for (const [name, def] of Object.entries(OP_DEFS)) {
         out.push({
             name,
+            domain: 'prefab',
             required: def.required,
             optional: def.optional,
             description: def.description,
             mutates: true,
         });
     }
-    for (const [name, def] of Object.entries(ANIM_OPS)) {
+    for (const [name, def] of Object.entries(ANIM_OP_DEFS)) {
         out.push({
             name,
+            domain: 'anim',
             required: def.required,
             optional: def.optional,
             description: def.description,
             mutates: true,
         });
     }
-    return out;
+    if (!domain) return out;
+    const want = String(domain).toLowerCase();
+    return out.filter((o) => o.domain === want);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -246,6 +262,12 @@ function editPrefab(args) {
             );
         }
 
+        // ⚠️ filePath 本身也要过护栏 ——
+        //    batchPrefab 的目标文件来自 ops JSON 文件，hub 只校验了那个 JSON 的位置，
+        //    结果项目 A 里的 ops.json 可以改写项目 B 的文件。
+        if (Array.isArray(args.allowedRoots) && args.allowedRoots.length) {
+            assertOpPathAllowed(ctxForGuard(args.allowedRoots), path.resolve(filePath), 'prefab 路径');
+        }
         const originalText = readTextFile(filePath);
         const originalData = parseJsonText(originalText, filePath);
         const ctx = loadPrefabForEdit(filePath);
@@ -253,6 +275,7 @@ function editPrefab(args) {
         ctx.classIdIndex = buildClassIdIndex(ctx.projectRoot);
         ctx.metaPlans = [];
         ctx.planMetaWrite = planMetaWrite;
+        ctx.allowedRoots = Array.isArray(args.allowedRoots) ? args.allowedRoots.slice() : null;
 
         // 2) 逐 op 在内存执行
         const results = [];
@@ -274,14 +297,22 @@ function editPrefab(args) {
 
         const newText = serializeJson(ctx.data, ctx.format);
         const diff = computeDiff(originalData, ctx.data);
+        // .meta 的写入也是真实改动，必须出现在 diff 里 ——
+        // 否则「改了但 diff 显示 0 处变化」，调用方会以为没改。
+        const metaChanges = ctx.metaPlans.map((plan) => ({
+            index: -1,
+            type: plan.existed ? 'meta-modified' : 'meta-created',
+            summary: `meta ${plan.existed ? '已更新' : '已创建'}: ${path.basename(plan.path)}`,
+        }));
+        const allChanges = diff.concat(metaChanges);
 
         // 3) dryRun → 只返回 diff
         if (args.dryRun) {
             return ok({
                 filePath,
                 dryRun: true,
-                wouldChange: diff.length,
-                diff,
+                wouldChange: allChanges.length,
+                diff: allChanges,
                 steps: results,
                 pendingMeta: ctx.metaPlans.map((p) => p.path),
             });
@@ -298,8 +329,8 @@ function editPrefab(args) {
         const written = commitPlans(plans);
         return ok({
             filePath,
-            changed: diff.length,
-            diff,
+            changed: allChanges.length,
+            diff: allChanges,
             steps: results,
             written,
         });
@@ -326,7 +357,7 @@ function batchPrefab(args) {
         if (!Array.isArray(parsed) && Array.isArray(parsed.files)) {
             const results = [];
             for (const f of parsed.files) {
-                const r = editPrefab({ filePath: f.filePath, ops: f.ops, dryRun: args.dryRun });
+                const r = editPrefab({ filePath: f.filePath, ops: f.ops, dryRun: args.dryRun, allowedRoots: args.allowedRoots });
                 results.push({ filePath: f.filePath, ok: r.ok, error: r.error, changed: r.data && r.data.changed });
             }
             const failed = results.filter((r) => !r.ok);
@@ -336,7 +367,7 @@ function batchPrefab(args) {
 
         const target = parsed && parsed.filePath;
         if (!target) return err('ops 文件里没有 filePath 字段');
-        return editPrefab({ filePath: target, ops, dryRun: args.dryRun });
+        return editPrefab({ filePath: target, ops, dryRun: args.dryRun, allowedRoots: args.allowedRoots });
     } catch (e) {
         return err(e);
     }
@@ -384,5 +415,5 @@ module.exports = {
     queryAnimation,
     editAnimation,
     // 便于测试与复用
-    _internal: { computeDiff, validateOps, OP_DEFS, ANIM_OPS },
+    _internal: { computeDiff, validateOps, OP_DEFS, ANIM_OP_DEFS },
 };

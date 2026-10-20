@@ -91,7 +91,14 @@ async function planUndo(op, ctx) {
             let createdUuid = null;
             return {
                 undo: async () => {
-                    if (createdUuid) await ctx.call('node.delete', { node: createdUuid, confirm: true });
+                    if (createdUuid) {
+                        await ctx.call('node.delete', { node: createdUuid, confirm: true });
+                        return;
+                    }
+                    // 兜底：响应没回来时 createdUuid 是 null，但编辑器可能已经建好了。
+                    // 按「父节点 + 名字」在场景树里找出来删掉。
+                    const found = await findNodeByNameUnder(ctx, args.parent, args.name);
+                    if (found) await ctx.call('node.delete', { node: found, confirm: true });
                 },
                 capture: (r) => {
                     createdUuid = r && r.uuid;
@@ -102,7 +109,12 @@ async function planUndo(op, ctx) {
             let newUuids = [];
             return {
                 undo: async () => {
-                    for (const u of newUuids) await ctx.call('node.delete', { node: u, confirm: true });
+                    if (newUuids.length) {
+                        for (const u of newUuids) await ctx.call('node.delete', { node: u, confirm: true });
+                        return;
+                    }
+                    const found = await findNodeByNameUnder(ctx, args.parent, args.name);
+                    if (found) await ctx.call('node.delete', { node: found, confirm: true });
                 },
                 capture: (r) => {
                     newUuids = (r && r.newUuids) || [];
@@ -113,8 +125,16 @@ async function planUndo(op, ctx) {
             const before = await captureNode(ctx, args.node);
             return {
                 undo: async () => {
+                    // 原本有父节点 → 移回去
                     if (before.parentUuid) {
                         await ctx.call('node.move', { node: args.node, parent: before.parentUuid });
+                        return;
+                    }
+                    // 原本是根节点（没有父节点）→ 必须移回场景根，
+                    // 否则层级变更会永久留存却报告「已回滚」。
+                    const root = await sceneRootUuid(ctx);
+                    if (root) {
+                        await ctx.call('node.move', { node: args.node, parent: root });
                     }
                 },
             };
@@ -223,6 +243,14 @@ async function planUndo(op, ctx) {
                     try {
                         if (before.position) await ctx.call('node.transform', { node: newUuid, position: before.position });
                         if (before.scale) await ctx.call('node.transform', { node: newUuid, scale: before.scale });
+                        if (before.rotation) {
+                            // ⚠️ dump 里的 rotation 是**四元数** {x,y,z,w}，
+                            //    而 node.transform 的 rotation 是**角度**（数字）。
+                            //    直接把四元数塞进去，bridge 会当成 object 类型下发，
+                            //    引擎不会反序列化成 Quat → 旋转恢复静默失败。
+                            const deg = quatToDegrees(before.rotation);
+                            if (deg !== null) await ctx.call('node.transform', { node: newUuid, rotation: deg });
+                        }
                         if (before.active === false) await ctx.call('node.active', { node: newUuid, active: false });
                         for (const c of before.components) {
                             if (c.type === 'cc.UITransform' || c.type === 'cc.Node') continue;
@@ -280,6 +308,8 @@ async function planUndo(op, ctx) {
  */
 async function runTransaction(ops, ctx, opts = {}) {
     const execute = opts.execute;
+    // rollback: false → 失败后**不**撤销，如实报告「场景可能处于中间态」
+    const doRollback = opts.rollback !== false;
     const journal = []; // {label, undo, note}
     const steps = [];
 
@@ -292,6 +322,16 @@ async function runTransaction(ops, ctx, opts = {}) {
         try {
             plan = await planUndo(op, ctx);
         } catch (e) {
+            if (!doRollback) {
+                return {
+                    ok: false,
+                    error: `${label} 无法纳入事务：${e.message}`,
+                    rolledBack: false,
+                    rollbackSkipped: true,
+                    rollbackErrors: [],
+                    completed: steps.length,
+                };
+            }
             const rollback = await rollbackAll(journal, ctx);
             return {
                 ok: false,
@@ -309,11 +349,25 @@ async function runTransaction(ops, ctx, opts = {}) {
             if (plan.capture) plan.capture(result);
         } catch (e) {
             // 3) 执行失败 → 逆序撤销
+            const unknown = isOutcomeUnknown(e);
+            if (!doRollback) {
+                return {
+                    ok: false,
+                    error: `${label} 执行失败：${e.message}`,
+                    rolledBack: false,
+                    rollbackSkipped: true,
+                    outcomeUnknown: unknown,
+                    rollbackErrors: [],
+                    completed: steps.length,
+                };
+            }
             const rollback = await rollbackAll(journal, ctx);
             return {
                 ok: false,
                 error: `${label} 执行失败：${e.message}`,
-                rolledBack: rollback.ok,
+                // 结果未知时**不能**说「已回滚」——编辑器可能已经执行了，只是响应没回来。
+                rolledBack: unknown ? false : rollback.ok,
+                outcomeUnknown: unknown,
                 rollbackErrors: rollback.errors,
                 completed: steps.length,
             };
@@ -324,6 +378,62 @@ async function runTransaction(ops, ctx, opts = {}) {
     }
 
     return { ok: true, committed: steps.length, steps };
+}
+
+/**
+ * 判断一个执行错误是「确定失败」还是「结果未知」。
+ *
+ * 超时 / 桥接不可达时，编辑器**可能已经执行了**这个操作，只是响应没回来。
+ * 这时如果报告「已回滚」，模型会以为场景是干净的、继续往上叠加改动 —— 最危险的一种撒谎。
+ */
+function isOutcomeUnknown(err) {
+    const code = err && err.code;
+    return code === 'TIMEOUT' || code === 'BRIDGE_UNREACHABLE';
+}
+
+/** 取场景根节点 uuid（懒加载，一次事务内缓存）。 */
+async function sceneRootUuid(ctx) {
+    if (ctx.__rootUuid !== undefined) return ctx.__rootUuid;
+    try {
+        const tree = await ctx.call('scene.tree', {});
+        const nodes = (tree && tree.nodes) || [];
+        ctx.__rootUuid = nodes.length ? nodes[0].uuid : null;
+    } catch (_) {
+        ctx.__rootUuid = null;
+    }
+    return ctx.__rootUuid;
+}
+
+/** 四元数 → 绕 Z 轴角度（度）。桥的 node.transform 只接受数字角度。 */
+function quatToDegrees(q) {
+    if (!q || typeof q !== 'object') return null;
+    const z = Number(q.z);
+    const w = Number(q.w);
+    if (!Number.isFinite(z) || !Number.isFinite(w)) return null;
+    const siny = 2 * (w * z);
+    const cosy = 1 - 2 * z * z;
+    const deg = (Math.atan2(siny, cosy) * 180) / Math.PI;
+    return Number.isFinite(deg) ? deg : null;
+}
+
+/** 按「父节点 + 名字」在场景树里找节点（兜底清理用）。 */
+async function findNodeByNameUnder(ctx, parentRef, name) {
+    try {
+        const tree = await ctx.call('scene.tree', {});
+        const nodes = (tree && tree.nodes) || [];
+        const parent = nodes.find((n) => n.uuid === parentRef || n.path === parentRef || n.name === parentRef);
+        // ⚠️ 父节点解析不出来时**不能**退化成「全场景同名匹配」——
+        //    那会删掉一个无关的同名节点（资产静默损坏）。
+        //    解析不出来就放弃兜底，让上层如实报告「回滚状态未知」。
+        if (!parent) return null;
+        const prefix = parent.path + '/';
+        const hits = nodes.filter((n) => n.name === name && n.path.startsWith(prefix));
+        // 同名多个也不删 —— 不确定就不动
+        if (hits.length !== 1) return null;
+        return hits[0].uuid;
+    } catch (_) {
+        return null;
+    }
 }
 
 /** 逆序撤销。 */
@@ -340,4 +450,13 @@ async function rollbackAll(journal, ctx) {
     return { ok: errors.length === 0, errors };
 }
 
-module.exports = { runTransaction, planUndo, captureNode, findCompIndex, rollbackAll };
+module.exports = {
+    runTransaction,
+    planUndo,
+    captureNode,
+    findCompIndex,
+    rollbackAll,
+    isOutcomeUnknown,
+    sceneRootUuid,
+    findNodeByNameUnder,
+};

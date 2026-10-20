@@ -27,7 +27,7 @@
 
 | 通病 | 真实表现 | 本项目 |
 |---|---|---|
-| 工具注册成功但一调用就报错 | harady 的 10 个 `reference-image` 消息名在 3.8.8 **根本不存在** | **111 条消息白名单**，全部经 3.8.8 包体二进制扫描验证；模型照旧教程调用时会收到「正确名是 X」而不是 not found |
+| 工具注册成功但一调用就报错 | harady 的 10 个 `reference-image` 消息名在 3.8.8 **根本不存在** | **114 条消息白名单**，全部经 3.8.8 包体二进制扫描验证；模型照旧教程调用时会收到「正确名是 X」而不是 not found |
 | 多步写操作中途失败留下半改场景 | listar 虽有 `scene:snapshot` 却没编排成事务；**且实测 Cocos 3.8.8 的 `snapshot-abort` / `cancel-recording` 根本不会回滚** | **`scene.transaction`**：自带 undo 日志 —— 执行前捕获逆操作，失败时逆序撤销（真机验证：失败事务后节点数 3 → 3） |
 | 任意网页能驱动你的编辑器 | DaxianLee 绑 127.0.0.1 + CORS `*` + 无鉴权 | **Bearer token + Host/Origin 校验 + 4MiB 限额**；**不提供任意 eval** |
 
@@ -105,33 +105,44 @@ Claude Code / Cursor / Codex
 
 ---
 
-## 工具清单（58 个）
+<!-- TOOLS:START -->
+
+## 工具清单（69 个）
 
 ### 全局工具（与编辑器实例无关，始终无前缀）
 
 | 工具 | 说明 |
 |---|---|
-| `cocos_knowledge` | Cocos 知识库：`components` / `coordinates` / `layout` / `workflow` / `traps` / `messages` |
-| `cocos_prefab_query` | 离线读 prefab：`tree` / `node` / `find` / `field` / `overrides` |
-| `cocos_prefab_edit` | 离线声明式改 prefab（**事务**：全成功才落盘） |
-| `cocos_prefab_batch` | 从 JSON 文件读 ops 批量改 |
-| `cocos_prefab_ops` | 列出全部 35 个离线 op 与参数 |
-| `cocos_anim_query` / `cocos_anim_batch` | 离线读写 .anim |
+| `cocos_message` | 直接调用一条**已验证存在**的 Cocos 编辑器消息（白名单外一律拒绝并给出正确名）。 |
+| `cocos_knowledge` | 查询 Cocos Creator 3.8.x 的实操知识，避免反复试错。topic 取值： |
+| `cocos_prefab_query` | 直接读 .prefab 文件（不需要编辑器运行）。 |
+| `cocos_prefab_edit` | 声明式批量修改 .prefab 文件。**所有 op 全部成功才会落盘，任一失败磁盘零写入**（事务语义）。 |
+| `cocos_prefab_batch` | 从 JSON 文件读取 ops 后批量编辑。opsJsonPath 是 JSON 文件的**绝对路径**，内容是 op 数组。 |
+| `cocos_prefab_ops` | 列出 cocos_prefab_edit / cocos_prefab_batch 支持的全部 **prefab** op、必填参数与可选参数。不确定某个操作叫什么名字时先查这里。动画相关 op 见 cocos_anim_ops。不需要参数。 |
+| `cocos_anim_ops` | 列出 cocos_anim_batch 支持的全部 **动画** op、必填参数与可选参数。prefab 相关 op 见 cocos_prefab_ops。不需要参数。 |
+| `cocos_anim_query` | 读 .anim 文件（不需要编辑器运行）。selector 取值：tree（轨道树）/ node（某节点的轨道）/ find（按名字找）/ field（查属性）。 |
+| `cocos_anim_batch` | 批量修改 .anim 文件的轨道与关键帧。op 支持 offset-curve（整体平移曲线）与 set-keyframe-value（改关键帧值）。 |
 
 ### 编辑器工具（单实例时无前缀，多实例时 `<短名>__` 前缀）
 
 | 域 | 工具 |
 |---|---|
-| 场景 | `scene.tree` `scene.node` `scene.find` `scene.open` `scene.create` `scene.save` `scene.reload` `scene.close` `scene.status` `scene.bounds` `scene.classes` `scene.components` `scene.snapshot` `scene.snapshot.abort` **`scene.transaction`** |
-| 节点 | `node.create` `node.delete` `node.duplicate` `node.move` `node.active` `node.transform` |
-| 组件 | `component.add` `component.remove` `component.list` `component.set` `component.call` |
-| 资源 | `asset.query` `asset.info` `asset.create` `asset.save` `asset.delete` `asset.move` `asset.reimport` `asset.refresh` `asset.uuid` `asset.url` `asset.dependencies` |
-| 视图/预览 | `preview.url` `view.focus` `view.options` |
-| 构建 | `build.start` `build.status` `build.platforms` |
-| 参考图 | `reference.add` `reference.remove` `reference.current` `reference.config` |
-| 编辑器 | `editor.info` `editor.logs` `editor.console.clear` |
-| 底层 | `cocos_message` 原始编辑器消息透传（危险级，白名单校验） |
+| asset | `asset.copy` `asset.create` `asset.delete` `asset.dependencies` `asset.info` `asset.move` `asset.path` `asset.query` `asset.refresh` `asset.reimport` `asset.save` `asset.url` `asset.users` `asset.uuid` |
+| build | `build.platforms` `build.start` `build.status` |
+| component | `component.add` `component.call` `component.list` `component.remove` `component.set` |
+| editor | `editor.console.clear` `editor.info` `editor.logs` |
+| node | `node.active` `node.clipboard` `node.create` `node.delete` `node.duplicate` `node.move` `node.transform` |
+| preferences | `preferences.get` `preferences.set` |
+| preview | `preview.url` |
+| project | `project.config` |
+| reference | `reference.add` `reference.config` `reference.current` `reference.remove` `reference.set` |
+| scene | `scene.bounds` `scene.classes` `scene.close` `scene.components` `scene.create` `scene.find` `scene.node` `scene.open` `scene.reload` `scene.save` `scene.script` `scene.snapshot` `scene.snapshot.abort` `scene.status` `scene.transaction` `scene.tree` |
+| view | `view.align` `view.focus` `view.options` |
 
+> 危险操作（`node.delete` / `component.remove` / `asset.delete` / `cocos_message`）
+> 必须在同一次调用里显式传 `confirm: true`，`confirm` 已写进工具 schema 的必填项，模型无法绕过。
+
+<!-- TOOLS:END -->
 ---
 
 ## 典型用法
@@ -265,7 +276,7 @@ cocos-mcp/
 │       │   └── index.js          # 工具装配与调度（含安全策略）
 │       ├── knowledge/
 │       │   ├── cocos-knowledge.json    # 组件属性表 / 坐标系 / 布局 / 踩坑
-│       │   └── editor-messages.json    # 111 条已验证消息清单
+│       │   └── editor-messages.json    # 114 条已验证消息清单
 │       └── offline/               # 离线 prefab / animation 编辑器（35 op）
 ├── extension/
 │   ├── package.json              # Cocos 扩展清单
@@ -274,7 +285,7 @@ cocos-mcp/
 │   ├── bridge/
 │   │   ├── server.js             # Bridge HTTP 服务（鉴权）
 │   │   ├── handlers.js           # 操作层（消息白名单 / 节点解析 / 类型推断 / 解包）
-│   │   └── messages.js           # ★ 111 条已验证消息白名单 + 别名纠错
+│   │   └── messages.js           # ★ 114 条已验证消息白名单 + 别名纠错
 │   └── panels/default/index.js   # 面板
 ├── scripts/install-extension.js
 ├── test/

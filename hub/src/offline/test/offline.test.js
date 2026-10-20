@@ -39,8 +39,10 @@ function makePrefab() {
             _active: true,
             _lpos: { x: 10, y: 20, z: 0 },
         },
-        { __type__: 'cc.Label', _string: 'hello', _fontSize: 24, _enabled: true },
-        { __type__: 'cc.Label', _string: 'child text', _enabled: true },
+        { __type__: 'cc.Label', _string: 'hello', _fontSize: 24, _enabled: true, node: { __id__: 1 } },
+        // Child 的 Label 带 node 回指 —— Cocos 的组件序列化就是这个形态，
+        // 克隆时必须重映射到克隆节点（否则组件会归属到源节点）
+        { __type__: 'cc.Label', _string: 'child text', _enabled: true, node: { __id__: 2 } },
         {
             __type__: 'cc.PrefabInfo',
             root: { __id__: 1 },
@@ -105,6 +107,26 @@ function makeStubPrefab() {
             targetOverrides: [],
         },
         { __type__: 'cc.TargetInfo', localID: ['c3R1Yi1maWxlLUlkLUExMDEyMzQ1Njc4'] },
+    ];
+}
+
+/**
+ * 真实 Cocos 3.8 的 .anim 形态：
+ *   - cc.animation.RealTrack 的 _channel 是**引用** {"__id__": N}
+ *   - 曲线元素是 cc.RealCurve，data 是**内联数组**的关键帧
+ *   - path 在 track 元素上
+ */
+function makeRealAnim() {
+    return [
+        { __type__: 'cc.AnimationClip', _name: 'idle', duration: 2, sample: 60, tracks: [{ __id__: 1 }] },
+        { __type__: 'cc.animation.RealTrack', path: 'Root/Child', _channel: { __id__: 2 } },
+        {
+            __type__: 'cc.RealCurve',
+            data: [
+                { __type__: 'cc.RealKeyframeValue', value: 0, time: 0 },
+                { __type__: 'cc.RealKeyframeValue', value: 100, time: 1 },
+            ],
+        },
     ];
 }
 
@@ -410,6 +432,33 @@ test('batchPrefab 从 JSON 文件读 ops', () => {
     assert.ok(after.some((e) => e._string === 'batched'));
 });
 
+test('★ ensure-meta 不得抹掉已有 .meta 的 subMetas / files / userData', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    const texPath = path.join(dir, 'hero.png');
+    fs.writeFileSync(texPath, 'x', 'utf8');
+    writeJson(f, makePrefab());
+    // 真实 Cocos 3.8 的 .meta 形态：ver 1.0.0 + 非空 files/subMetas/userData
+    const existing = {
+        ver: '1.0.0',
+        importer: 'texture',
+        imported: true,
+        uuid: 'REAL-TEX-UUID-AAAA-BBBB',
+        files: ['/hero.png'],
+        subMetas: { '6c48a': { importer: 'sprite-frame' } },
+        userData: { keepMe: 'important' },
+    };
+    fs.writeFileSync(`${texPath}.meta`, JSON.stringify(existing, null, 2) + '\n', 'utf8');
+
+    const r = offline.editPrefab({ filePath: f, ops: [{ op: 'ensure-meta', path: texPath }] });
+    assert.ok(r.ok, r.error);
+    const meta = JSON.parse(fs.readFileSync(`${texPath}.meta`, 'utf8'));
+    assert.strictEqual(meta.uuid, 'REAL-TEX-UUID-AAAA-BBBB', 'uuid 不得变');
+    assert.deepStrictEqual(meta.files, ['/hero.png'], '★ files 不得被抹掉');
+    assert.deepStrictEqual(meta.subMetas, { '6c48a': { importer: 'sprite-frame' } }, '★ subMetas 不得被抹掉（SpriteFrame 引用靠它）');
+    assert.deepStrictEqual(meta.userData, { keepMe: 'important' }, '★ userData 不得被抹掉');
+});
+
 test('ensure-meta 生成合法 .meta 且 uuid 稳定', () => {
     const dir = tmpdir();
     const f = path.join(dir, 'a.prefab');
@@ -420,10 +469,169 @@ test('ensure-meta 生成合法 .meta 且 uuid 稳定', () => {
     assert.ok(r.ok, r.error);
     const meta = JSON.parse(fs.readFileSync(`${scriptPath}.meta`, 'utf8'));
     assert.ok(meta.uuid, '.meta 必须有 uuid');
-    assert.strictEqual(meta.importer, 'prefab');
+    // .ts 必须用 typescript 导入器 —— 写成 prefab 会让 Cocos 用 prefab
+    // 导入器解析脚本，该脚本彻底无法编译。
+    assert.strictEqual(meta.importer, 'typescript');
+});
+
+test('★ ensure-meta 不得改写已有 .meta 的 uuid（资产主键）', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    const scriptPath = path.join(dir, 'MyScript.ts');
+    fs.writeFileSync(scriptPath, 'export class MyScript {}', 'utf8');
+    writeJson(f, makePrefab());
+    // 预置一个已有 uuid 的 .meta
+    const existing = {
+        ver: '1.1.0',
+        importer: 'typescript',
+        imported: true,
+        uuid: 'REAL-UUID-1111-2222-3333-444455556666',
+        files: [],
+        subMetas: {},
+        userData: {},
+    };
+    fs.writeFileSync(`${scriptPath}.meta`, JSON.stringify(existing, null, 2) + '\n', 'utf8');
+
+    const r = offline.editPrefab({ filePath: f, ops: [{ op: 'ensure-meta', path: scriptPath }] });
+    assert.ok(r.ok, r.error);
+    const meta = JSON.parse(fs.readFileSync(`${scriptPath}.meta`, 'utf8'));
+    assert.strictEqual(meta.uuid, 'REAL-UUID-1111-2222-3333-444455556666', '★ uuid 不得被改写');
+    assert.strictEqual(meta.importer, 'typescript', 'importer 也不得被改写');
+});
+
+test('★ set-component-field 带数组下标不得摧毁数组', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    const data = makePrefab();
+    // 给 Child 的 Label 加一个数组字段
+    data[4]._items = [{ v: 1 }, { v: 2 }];
+    writeJson(f, data);
+    const r = offline.editPrefab({
+        filePath: f,
+        ops: [{ op: 'set-component-field', node: 'Child', component: 'cc.Label', property: '_items.0.v', value: 99 }],
+    });
+    assert.ok(r.ok, r.error);
+    const after = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const label = after.find((e) => e.__type__ === 'cc.Label' && Array.isArray(e._items));
+    assert.ok(label, '数组字段应仍在');
+    assert.ok(Array.isArray(label._items), '★ _items 必须还是数组，不能被替换成对象');
+    assert.strictEqual(label._items.length, 2, '★ 第二个元素不能丢');
+    assert.strictEqual(label._items[0].v, 99);
+    assert.strictEqual(label._items[1].v, 2);
+});
+
+test('★ bulk-set 的写入目标与匹配条件分离', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    writeJson(f, makePrefab());
+    const r = offline.editPrefab({
+        filePath: f,
+        ops: [{
+            op: 'bulk-set',
+            selector: 'byComponent',
+            target: 'component:cc.Label',
+            match: 'cc.Label',
+            property: '_string',
+            value: 'BULK',
+        }],
+    });
+    assert.ok(r.ok, r.error);
+    assert.ok(r.data.steps[0].result.applied >= 1, '应至少应用 1 处');
+    const after = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const label = after.find((e) => e.__type__ === 'cc.Label' && e._string === 'BULK');
+    assert.ok(label, '★ 值必须写在组件上，而不是节点上');
+    const node = after.find((e) => e.__type__ === 'cc.Node' && e._name === 'Root');
+    assert.strictEqual(node._string, undefined, '★ 节点上不应出现 _string');
+});
+
+test('★ reparent 必须同步 _parent 并让同批次后续步骤能用新路径', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    const data = makePrefab();
+    // Root 下再加一个 Other
+    data.push({ __type__: 'cc.Node', _name: 'Other', _children: [], _components: [], _prefab: { __id__: 5 }, _active: true, _lpos: { x: 0, y: 0, z: 0 } });
+    data[1]._children.push({ __id__: 6 });
+    writeJson(f, data);
+    const r = offline.editPrefab({
+        filePath: f,
+        ops: [
+            { op: 'reparent', node: 'Child', parent: 'Other' },
+            { op: 'set-active', node: 'Other/Child', active: false },
+        ],
+    });
+    assert.ok(r.ok, r.error);
+    const after = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const child = after.find((e) => e.__type__ === 'cc.Node' && e._name === 'Child');
+    assert.strictEqual(child._active, false, '第 2 步应该能找到新路径下的节点');
+    const other = after.find((e) => e.__type__ === 'cc.Node' && e._name === 'Other');
+    assert.ok(other._children.some((c) => c.__id__ === 2), 'Other 应持有 Child');
+    assert.strictEqual(child._parent.__id__, after.indexOf(other), '★ _parent 必须指向新父节点');
+});
+
+test('★ clone-node 的组件回指必须重映射到克隆节点', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    writeJson(f, makePrefab());
+    const r = offline.editPrefab({
+        filePath: f,
+        ops: [{ op: 'clone-node', node: 'Child', name: 'ChildClone' }],
+    });
+    assert.ok(r.ok, r.error);
+    const after = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const clone = after.find((e) => e.__type__ === 'cc.Node' && e._name === 'ChildClone');
+    assert.ok(clone, '克隆节点应存在');
+    const cloneCompIdx = clone._components[0].__id__;
+    const cloneComp = after[cloneCompIdx];
+    assert.ok(cloneComp, '克隆的组件应存在');
+    assert.strictEqual(cloneComp.node.__id__, after.indexOf(clone), '★ 组件的 node 回指必须指向克隆节点，而不是源节点');
 });
 
 // ────────────────────────────── anim ──────────────────────────────
+
+test('★ 真实 Cocos .anim 形态下 offset-curve 真的改到关键帧', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.anim');
+    writeJson(f, makeRealAnim());
+    const r = offline.editAnimation({
+        filePath: f,
+        ops: [{ op: 'offset-curve', path: 'Root/Child', offset: 5 }],
+    });
+    assert.ok(r.ok, r.error);
+    assert.ok(r.data.changed > 0, '★ 必须报告有改动（之前是「成功但零改动」）');
+    const after = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const curve = after.find((e) => e.__type__ === 'cc.RealCurve');
+    assert.ok(curve, '曲线元素应还在');
+    assert.strictEqual(curve.data[0].value, 5, '★ 第一个关键帧应被偏移');
+    assert.strictEqual(curve.data[1].value, 105, '★ 第二个关键帧应被偏移');
+});
+
+test('★ 真实 Cocos .anim 形态下通道路径要能被筛出来', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.anim');
+    writeJson(f, makeRealAnim());
+    const r = offline.queryAnimation({ filePath: f, selector: 'tree' });
+    assert.ok(r.ok, r.error);
+    assert.ok(r.data.count >= 1, '应至少找到一个通道');
+    assert.ok(
+        r.data.channels.some((c) => c.path === 'Root/Child'),
+        '★ 通道路径必须来自 track 元素，实际：' + JSON.stringify(r.data.channels)
+    );
+});
+
+test('★ 找不到关键帧必须报错，不能「报告成功但零改动」', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.anim');
+    // 通道存在但曲线形态不支持
+    writeJson(f, [
+        { __type__: 'cc.AnimationClip', _name: 'x', duration: 1, tracks: [{ __id__: 1 }] },
+        { __type__: 'cc.animation.RealTrack', path: 'P', _channel: { __id__: 2 } },
+        { __type__: 'cc.UnknownCurve', foo: 1 },
+    ]);
+    const before = fs.readFileSync(f, 'utf8');
+    const r = offline.editAnimation({ filePath: f, ops: [{ op: 'offset-curve', path: 'P', offset: 5 }] });
+    assert.strictEqual(r.ok, false, '应该报错而不是报告成功');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, '失败时磁盘必须不变');
+});
 
 test('queryAnimation tree 列出通道', () => {
     const dir = tmpdir();

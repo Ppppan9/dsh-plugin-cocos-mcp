@@ -11,21 +11,16 @@
   "license": "MIT",
   "contributions": {
     "menu": [
-      {
-        "path": "i18n:menu.extension",
-        "label": "Cocos MCP",
-        "items": [
-          { "path": "i18n:menu.extension", "label": "打开面板", "message": "open-panel" },
-          { "path": "i18n:menu.extension", "label": "复制 MCP 配置", "message": "copy-client-config" },
-          { "path": "i18n:menu.extension", "label": "重启 Bridge", "message": "restart-bridge" }
-        ]
-      }
+      { "path": "i18n:menu.extension", "label": "Cocos MCP · 打开面板", "message": "open-panel" },
+      { "path": "i18n:menu.extension", "label": "Cocos MCP · 复制 MCP 配置", "message": "copy-client-config" },
+      { "path": "i18n:menu.extension", "label": "Cocos MCP · 重启 Bridge", "message": "restart-bridge" }
     ],
     "messages": {
       "open-panel": { "methods": ["openPanel"] },
       "copy-client-config": { "methods": ["copyClientConfig"] },
       "restart-bridge": { "methods": ["restartBridge"] },
-      "get-bridge-status": { "methods": ["getBridgeStatus"] }
+      "get-bridge-status": { "methods": ["getBridgeStatus"] },
+      "get-hub-info": { "methods": ["getHubInfo"] }
     },
     "scene": {
       "script": "./scene.js"
@@ -35,7 +30,7 @@
     "default": {
       "title": "Cocos MCP",
       "main": "./panels/default/index.js",
-      "flags": { "close": false, "popup": false, "save": true },
+      "type": "dockable",
       "size": { "min-width": 360, "min-height": 420, "width": 420, "height": 560 }
     }
   }

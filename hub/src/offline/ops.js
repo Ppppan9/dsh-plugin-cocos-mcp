@@ -119,14 +119,13 @@ const OP_DEFS = {
     'bulk-set': {
         required: ['selector', 'target', 'property', 'value'],
         optional: ['match'],
-        description: '按选择器批量设置属性。selector: byComponent / byNamePrefix / byNameRegex；target: node | component:<类型>',
+        description:
+            '按选择器批量设置属性。\n' +
+            'selector: byComponent（按组件类型匹配）/ byNamePrefix（按名字前缀）/ byNameRegex（按名字正则）。\n' +
+            'target: **写入目标** —— "node" 写节点，或 "component:cc.Label" 写组件。\n' +
+            'match: 匹配条件；byComponent 时填组件类型名（如 "cc.Label"），缺省时从 target 推导。\n' +
+            '例：{"selector":"byComponent","target":"component:cc.Label","match":"cc.Label","property":"string","value":"确定"}',
     },
-};
-
-const ANIM_OPS = {
-    'offset-curve': { required: ['node', 'property', 'offset'], optional: ['axis', 'time'], description: '整体平移一条曲线。' },
-    'set-keyframe-value': { required: ['node', 'property', 'time', 'value'], optional: [], description: '修改某个关键帧的值。' },
-    'set-curve-channel': { required: ['node', 'property', 'channel'], optional: [], description: '设置轨道使用的通道。' },
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -230,7 +229,16 @@ function rebuildPaths(ctx) {
 }
 
 function findNodeIndex(ctx, ref) {
-    if (typeof ref === 'number') return ref;
+    if (typeof ref === 'number') {
+        // 数字索引也要校验 —— 不校验的话，下标越界会变成
+        // "Cannot set properties of undefined" 这种没法定位的裸 TypeError。
+        if (!ctx.nodes.has(ref)) {
+            throw new Error(
+                `节点下标 ${ref} 不存在（prefab 里有 ${ctx.nodes.size} 个节点，元素总数 ${ctx.data.length}）。`
+            );
+        }
+        return ref;
+    }
     if (typeof ref !== 'string' || !ref) throw new Error('node 参数必须是节点路径/名称或索引');
     // 1) 完整路径
     if (ctx.paths.has(ref)) return ctx.paths.get(ref);
@@ -246,10 +254,11 @@ function findNodeIndex(ctx, ref) {
     if (hit >= 0) return hit;
     // 3) 名字匹配（取最浅的一个）。用**实时** displayName —— 重命名后
     //    ctx.paths / info.name 是旧值，只有读元素本身才是当前名字。
+    //    孤儿节点（已软删）不参与匹配。
     let best = null;
     for (const idx of ctx.nodeOrder) {
         const info = ctx.nodes.get(idx);
-        if (info && displayName(ctx, idx) === ref) {
+        if (info && !ctx.orphanNodes.has(idx) && displayName(ctx, idx) === ref) {
             if (!best || info.depth < ctx.nodes.get(best).depth) best = idx;
         }
     }
@@ -265,7 +274,9 @@ function nodeComponents(ctx, nodeIndex) {
 
 function findComponent(ctx, nodeIndex, componentType) {
     const comps = nodeComponents(ctx, nodeIndex);
-    const norm = normalizeCompType(componentType);
+    // ⚠️ 必须传 ctx —— 否则 normalizeCompType 拿不到 classIdIndex，
+    // @ccclass("Foo") 这种脚本组件名就找不到（建得出来、却用不了）。
+    const norm = normalizeCompType(componentType, ctx);
     let hit = comps.find((c) => c.type === componentType || c.type === norm);
     if (!hit) hit = comps.find((c) => c.type && (c.type.endsWith('.' + componentType) || c.type.endsWith('.' + norm)));
     if (!hit) {
@@ -376,15 +387,65 @@ function getPath(obj, segments) {
     return cur;
 }
 
+/**
+ * 按路径写值。
+ *
+ * ⚠️ 数组必须**当数组处理**：
+ * 之前用 `isPlainObject(cur[s])` 判断，遇到数组会把它替换成 {} ——
+ * 于是 `_items.0.v` 这种带下标的路径会**摧毁整个数组**，
+ * 剩下的元素静默丢失，磁盘上还是「改成功了」。
+ */
 function setPath(obj, segments, value) {
     if (!segments.length) return false;
     let cur = obj;
-    for (let i = 0; i < segments.length - 1; i++) {
+    let i = 0;
+    while (i < segments.length - 1) {
         const s = segments[i];
-        if (!isPlainObject(cur[s])) cur[s] = {};
-        cur = cur[s];
+        const next = cur[s];
+        if (Array.isArray(next)) {
+            // 数组：下一段是数字下标 —— 要落到**元素**上，不是数组本身
+            const idx = segments[i + 1];
+            if (typeof idx !== 'number' || idx < 0 || idx >= next.length) {
+                throw new Error(
+                    `路径 "${segments.join('.')}" 的下标 "${idx}" 超出数组范围（长度 ${next.length}）。` +
+                    '不会修改该数组。'
+                );
+            }
+            cur = next[idx];
+            i += 2;
+            continue;
+        }
+        if (isPlainObject(next)) {
+            cur = next;
+            i += 1;
+            continue;
+        }
+        if (next === undefined || next === null) {
+            // 缺失的中间层：按下一段是数字就建数组，否则建对象
+            const created = typeof segments[i + 1] === 'number' ? [] : {};
+            cur[s] = created;
+            cur = created;
+            i += 1;
+            continue;
+        }
+        // 已经是标量（字符串/数字/布尔）→ 不能往里写，抛错而不是覆盖
+        throw new Error(
+            `路径 "${segments.join('.')}" 在 "${segments.slice(0, i + 1).join('.')}" 处遇到非容器值` +
+            `（${typeof next}），无法写入。已中止，未修改任何数据。`
+        );
     }
-    cur[segments[segments.length - 1]] = value;
+    const last = segments[segments.length - 1];
+    if (Array.isArray(cur)) {
+        if (typeof last !== 'number' || last < 0 || last >= cur.length) {
+            throw new Error(`路径末段 "${last}" 不是数组的有效下标（长度 ${cur.length}）。`);
+        }
+        cur[last] = value;
+        return true;
+    }
+    if (!isPlainObject(cur)) {
+        throw new Error(`路径 "${segments.join('.')}" 的父级不是对象，无法写入。`);
+    }
+    cur[last] = value;
     return true;
 }
 
@@ -467,6 +528,13 @@ const HANDLERS = {
         if (op.index === undefined || op.index === null) pe._children.push({ __id__: idx });
         else pe._children.splice(Number(op.index), 0, { __id__: idx });
         ctx.nodes.get(idx).parentIndex = parentIdx;
+        // ⚠️ 必须同步更新节点元素上的 _parent：
+        // Cocos 反序列化时靠 _parent 建父子关系。只改内存索引的话，
+        // 落盘后会出现「旧父节点不持有它 / 新父节点持有它 / _parent 却指向旧父节点」
+        // 的三方矛盾 —— 引擎要么把节点挂回去，要么报 already has a parent。
+        ctx.data[idx]._parent = { __id__: parentIdx };
+        // 层级变了 → 路径索引要重建，否则同一批次后续步骤用旧路径会找不到节点
+        rebuildPaths(ctx);
         return { node: displayName(ctx, idx), parent: displayName(ctx, parentIdx) };
     },
 
@@ -498,11 +566,14 @@ const HANDLERS = {
             _children: [],
             _components: [],
             _prefab: null,
+            _active: true,
+            _id: '',
             _lpos: { x: Number(op.x || 0), y: Number(op.y || 0), z: Number(op.z || 0) },
             _lrot: { x: 0, y: 0, z: 0, w: 1 },
             _lscale: { x: 1, y: 1, z: 1 },
             _mobility: 0,
             _layer: 33554432,
+            _euler: { x: 0, y: 0, z: 0 },
         };
         ctx.data.push(node);
         const parent = ctx.data[parentIdx];
@@ -532,6 +603,9 @@ const HANDLERS = {
             if (!n) return;
             orphans.push(i);
             ctx.orphanNodes.add(i);
+            // 孤儿节点不再出现在路径索引里 —— 否则同一批次后续步骤还能
+            // 找到并修改一个编辑器根本看不到的节点（不可见的写入）。
+            ctx.paths.delete(n.path);
             for (const c of n.components) ctx.orphanComponents.add(c.index);
             for (const c of n.children) mark(c);
         };
@@ -570,15 +644,27 @@ const HANDLERS = {
                 const compNew = ctx.data.length;
                 ctx.data.push(compCopy);
                 curEl._components.push({ __id__: compNew });
+                // ⚠️ 组件副本也必须进 map —— Cocos 的组件序列化里有
+                // `node: {__id__: N}` 回指节点，组件不进 map 就不会被重映射，
+                // 克隆出的组件会**归属到源节点**上。
+                map.set(comp.index, compNew);
             }
         }
-        // 修正引用
-        const remap = (el) => {
-            if (!isPlainObject(el)) return;
+        // 修正引用（递归，含数组 —— 组件的 node 回指在数组里也可能出现）
+        const remap = (el, seen = new Set()) => {
+            if (!isPlainObject(el) && !Array.isArray(el)) return;
+            if (seen.has(el)) return;
+            seen.add(el);
+            if (Array.isArray(el)) {
+                for (const item of el) remap(item, seen);
+                return;
+            }
             for (const k of Object.keys(el)) {
                 const v = el[k];
                 if (isPlainObject(v) && typeof v.__id__ === 'number' && map.has(v.__id__)) {
                     el[k] = { __id__: map.get(v.__id__) };
+                } else {
+                    remap(v, seen);
                 }
             }
         };
@@ -587,8 +673,12 @@ const HANDLERS = {
         const parentEl = ctx.data[parentIdx];
         parentEl._children = parentEl._children || [];
         parentEl._children.push({ __id__: rootNew });
+        // ⚠️ 克隆节点的 _parent 必须指向新父节点，
+        // 否则落盘后「父节点持有它 / _parent 却指向源父节点」，层级自相矛盾。
+        ctx.data[rootNew]._parent = { __id__: parentIdx };
         // 新 fileId
         ctx.data[rootNew]._name = String(op.name);
+        rebuildPaths(ctx);
         return { cloned: displayName(ctx, idx), newIndex: rootNew, name: String(op.name) };
     },
 
@@ -652,7 +742,7 @@ const HANDLERS = {
             if (!inst) throw new Error('stub 节点没有对应的 PrefabInstance，无法写 override');
             const localID = resolveLocalIdForComponent(ctx, idx, comp.index);
             upsertOverride(ctx, inst, { localID, propertyPath: splitPath(op.property), value: { __id__: refIdx } });
-            ensureTargetOverride(ctx, inst);
+            ensureTargetOverride(ctx, inst, localID);
             return { node: displayName(ctx, idx), component: comp.type, property: op.property, ref: displayName(ctx, refIdx), viaOverride: true };
         }
         const segs = splitPath(op.property);
@@ -679,7 +769,7 @@ const HANDLERS = {
         }
         const localID = resolveLocalIdForComponent(ctx, idx, comp.index);
         upsertOverride(ctx, inst, { localID, propertyPath: splitPath(op.property), value: op.value });
-        ensureTargetOverride(ctx, inst);
+        ensureTargetOverride(ctx, inst, localID);
         return {
             node: displayName(ctx, idx),
             component: comp.type,
@@ -738,10 +828,11 @@ const HANDLERS = {
 
     'add-nested-prefab': (ctx, op) => {
         const parentIdx = findNodeIndex(ctx, op.parent);
+        if (op.prefabPath) assertOpPathAllowed(ctx, path.resolve(op.prefabPath), 'add-nested-prefab.prefabPath');
         const prefabPath = op.prefabPath || resolvePrefabPath(ctx, op.prefabUuid);
         if (!prefabPath) throw new Error(`找不到 prefab "${op.prefabUuid}" 对应的文件路径（可显式传 prefabPath）`);
         const created = inlineNestedPrefab(ctx, {
-            parentIndex,
+            parentIndex: parentIdx,   // ← 修正：原来传的是未定义的 parentIndex，这个 op 必然抛错
             prefabPath,
             name: op.name,
             x: op.x,
@@ -752,6 +843,7 @@ const HANDLERS = {
 
     'replace-nested-prefab': (ctx, op) => {
         const idx = findNodeIndex(ctx, op.node);
+        if (op.prefabPath) assertOpPathAllowed(ctx, path.resolve(op.prefabPath), 'replace-nested-prefab.prefabPath');
         const prefabPath = op.prefabPath || resolvePrefabPath(ctx, op.prefabUuid);
         if (!prefabPath) throw new Error(`找不到 prefab "${op.prefabUuid}" 对应的文件路径（可显式传 prefabPath）`);
         const r = replaceNestedPrefab(ctx, { nodeIndex: idx, prefabPath });
@@ -780,14 +872,38 @@ const HANDLERS = {
 
     'ensure-meta': (ctx, op) => {
         const target = path.resolve(op.path);
+        assertOpPathAllowed(ctx, target, 'ensure-meta.path');
         const plan = ctx.planMetaWrite(target, { uuid: op.uuid });
-        if (!plan) return { skipped: target, reason: '已存在 .meta' };
+        // planMetaWrite 一定返回对象（existed 时也会返回，内容不变时 skipped=true）
+        if (plan.skipped) {
+            return { meta: plan.path, uuid: plan.uuid, skipped: true, reason: '已有 .meta 且内容一致，未改动' };
+        }
         ctx.metaPlans.push(plan);
-        return { meta: plan.metaPath, uuid: plan.uuid };
+        // ★ 返回真实的路径与 uuid —— 之前返回的 metaPath / uuid 两个字段根本不存在，
+        //   调用方拿到的 result 是空对象。
+        return { meta: plan.path, uuid: plan.uuid, created: !plan.existed, modified: plan.existed };
     },
 
+    /**
+     * 批量设置。
+     *
+     * ⚠️ 之前 `target` 同时被当作「匹配条件」和「写入目标」，
+     * 两种语义互斥 —— 无论怎么写都改不到组件上，却报告 applied>0（假成功）。
+     * 现在拆开：
+     *   - `match`   —— 匹配条件（byComponent 时是组件类型名，如 "cc.Label"）
+     *   - `target`  —— 写入目标："node" 或 "component:<类型>"
+     *   - 为兼容旧写法，byComponent 的 match 缺省时从 target 推导。
+     */
     'bulk-set': (ctx, op) => {
         const selector = op.selector;
+        const writeTarget = String(op.target || 'node');
+        const isComponentTarget = writeTarget.startsWith('component:');
+        const targetCompType = isComponentTarget ? writeTarget.slice('component:'.length) : null;
+        // byComponent 的 match 缺省时从 target 推导 —— target 形如 "component:cc.Label"，
+        // 组件类型是 "cc.Label"，要**去前缀**才能匹配上。
+        const derivedMatch = writeTarget.startsWith('component:') ? writeTarget.slice('component:'.length) : writeTarget;
+        const matchCompType = op.match || (selector === 'byComponent' ? derivedMatch : null);
+
         const targets = [];
         for (const idx of ctx.nodeOrder) {
             const info = ctx.nodes.get(idx);
@@ -795,31 +911,88 @@ const HANDLERS = {
             const name = info.name;
             let hit = false;
             if (selector === 'byComponent') {
-                hit = nodeComponents(ctx, idx).some((c) => c.type === op.target || c.type.endsWith('.' + op.target));
+                hit = nodeComponents(ctx, idx).some((c) => c.type === matchCompType || c.type.endsWith('.' + matchCompType));
             } else if (selector === 'byNamePrefix') {
-                hit = name.startsWith(op.match || op.target);
+                // ⚠️ match 为空会让 startsWith('') 恒真 → 把**所有**节点都改一遍。
+                //   match 在 schema 里是可选的，漏填就从「什么都不做」变成「全量改写」。
+                if (!op.match) {
+                    throw new Error('byNamePrefix 必须提供 match（名字前缀）。留空会匹配全部节点，已拒绝。');
+                }
+                hit = name.startsWith(op.match);
             } else if (selector === 'byNameRegex') {
-                hit = new RegExp(op.match || op.target).test(name);
+                if (!op.match) {
+                    throw new Error('byNameRegex 必须提供 match（正则）。留空会匹配全部节点，已拒绝。');
+                }
+                let re;
+                try {
+                    re = new RegExp(op.match);
+                } catch (e) {
+                    throw new Error(`byNameRegex 的正则 "${op.match}" 不合法：${e.message}`);
+                }
+                hit = re.test(name);
+            } else {
+                throw new Error(`未知的 bulk-set selector "${selector}"，可用：byComponent / byNamePrefix / byNameRegex`);
             }
             if (hit) targets.push(idx);
         }
+
         let applied = 0;
+        const skipped = [];
         for (const idx of targets) {
-            const target = op.target;
-            if (target.startsWith('component:')) {
-                const compType = target.slice('component:'.length);
+            if (isComponentTarget) {
                 const comps = nodeComponents(ctx, idx);
-                const comp = comps.find((c) => c.type === compType || c.type.endsWith('.' + compType));
-                if (!comp) continue;
+                const comp = comps.find((c) => c.type === targetCompType || c.type.endsWith('.' + targetCompType));
+                if (!comp) {
+                    skipped.push({ node: displayName(ctx, idx), reason: `没有组件 ${targetCompType}` });
+                    continue;
+                }
                 setPath(comp.element, splitPath(op.property), op.value);
             } else {
                 setPath(ctx.data[idx], splitPath(op.property), op.value);
             }
             applied++;
         }
-        return { matched: targets.length, applied };
+        return {
+            matched: targets.length,
+            applied,
+            skipped: skipped.length,
+            skipDetails: skipped.slice(0, 10),
+            target: writeTarget,
+            match: matchCompType,
+        };
     },
 };
+
+/**
+ * op 级路径校验（纵深防御）。
+ *
+ * hub 层已经对 op 内的路径做过项目边界校验，但离线模块自己也要守一道 ——
+ * 这个模块是独立的可复用单元，不能假设调用方一定检查过。
+ * ctx.allowedRoots 由调用方注入（hub 传项目根 + 额外根）。
+ */
+function assertOpPathAllowed(ctx, target, label) {
+    const roots = ctx && Array.isArray(ctx.allowedRoots) ? ctx.allowedRoots : null;
+    if (roots === null) {
+        // 调用方**没有配置**白名单（独立 CLI 用法）→ 不拦，由调用方自己负责
+        return;
+    }
+    if (!roots.length) {
+        // 调用方显式给了空白名单 = 「不允许任何目录」→ 拒绝一切
+        // ⚠️ 不能退化成「不拦」——「没配限制就全放行」在护栏语义下等于没有护栏。
+        throw new Error(
+            `${label} "${target}" 无法校验：目录白名单为空，已拒绝。` +
+            '（离线文件操作必须限定在已注册的 Cocos 项目目录内。）'
+        );
+    }
+    const resolved = path.resolve(target);
+    for (const root of roots) {
+        const rel = path.relative(path.resolve(root), resolved);
+        if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return;
+    }
+    throw new Error(
+        `${label} "${resolved}" 不在允许的目录范围内（允许：${roots.map((r) => path.resolve(r)).join('、')}）。已拒绝。`
+    );
+}
 
 function setComponentShortcut(ctx, op, compType, fieldMap) {
     const idx = findNodeIndex(ctx, op.node);
@@ -859,7 +1032,6 @@ function resolvePrefabPath(ctx, prefabUuid) {
 
 module.exports = {
     OP_DEFS,
-    ANIM_OPS,
     HANDLERS,
     validateOps,
     normalizeCompType,
@@ -873,4 +1045,5 @@ module.exports = {
     setPath,
     splitPath,
     suggest,
+    assertOpPathAllowed,
 };

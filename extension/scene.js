@@ -173,4 +173,9 @@ METHODS.getSceneSummary = function getSceneSummary() {
     return { name: scene.name, nodes, components };
 };
 
-module.exports = METHODS;
+/**
+ * ⚠️ 必须是 `exports.methods` —— Cocos 3.8 的 `scene:execute-scene-script`
+ *    按 `exports.methods[method]` 派发。直接 `module.exports = METHODS`
+ *    的话方法根本找不到（官方内置 reflection-probe 与第三方扩展都是 exports.methods）。
+ */
+module.exports = { methods: METHODS };

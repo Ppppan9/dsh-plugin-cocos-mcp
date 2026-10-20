@@ -8,9 +8,13 @@
  * 读文档变成点一下。
  */
 
-const { message, getCurrentLanguage } = require('cc');
+// ⚠️ 不要 require('cc') —— Cocos 3.8 的内置 Vue 是 2.7.14，
+//    'cc' 的 Module._load 补丁只打在主进程，面板跑在渲染进程，require 会抛
+//    'Cannot find module cc' → 面板整个白屏。这两个变量本来也没用到。
 
-const { api } = require('../../../bridge/status-client.js');
+// ⚠️ 路径要相对**当前文件目录**：面板在 <扩展>/panels/default/index.js，
+//    '../..' 才是扩展包根。之前写 '../../../' 会跑到 <项目>/extensions/bridge/ → 不存在。
+const { api } = require('../../bridge/status-client.js');
 
 module.exports = {
     template: `
@@ -76,6 +80,16 @@ button { padding: 4px 12px; cursor: pointer; }
     },
 
     methods: {
+        /**
+         * ⚠️ 必须放在 methods 里 —— Vue 2 的选项合并只认 methods 对象的成员，
+         *    顶层的自定义选项不会挂到实例上，`this._stopTimer` 会是 undefined。
+         */
+        _stopTimer() {
+            if (this._timer) {
+                clearInterval(this._timer);
+                this._timer = null;
+            }
+        },
         async refresh() {
             try {
                 this.status = await api.getStatus();
@@ -103,7 +117,16 @@ button { padding: 4px 12px; cursor: pointer; }
         this.refresh();
         this._timer = setInterval(() => this.refresh(), 5000);
     },
-    beforeUnmount() {
-        if (this._timer) clearInterval(this._timer);
+    /**
+     * ⚠️ Cocos 3.8 的面板生命周期是 ready / beforeClose / close ——
+     *    **没有 beforeUnmount**（那是 Vue 3 的钩子，内置是 Vue 2.7.14，永不触发）。
+     *    之前写 beforeUnmount → 面板关掉后 5 秒定时器继续跑，
+     *    每开一次面板就多一个定时器并发跨进程刷新。两个钩子都实现最稳。
+     */
+    beforeClose() {
+        this._stopTimer();
+    },
+    close() {
+        this._stopTimer();
     },
 };

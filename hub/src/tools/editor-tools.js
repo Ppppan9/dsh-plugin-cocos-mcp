@@ -95,7 +95,7 @@ const EDITOR_TOOLS = [
         inputSchema: { type: 'object', properties: { uuid: { type: 'string' } }, required: ['uuid'] },
         op: 'scene.open',
         safety: 'write',
-        timeoutMs: 120000,
+        timeoutMs: 150000,
     }),
     T('scene.create', {
         title: '新建场景',
@@ -129,7 +129,7 @@ const EDITOR_TOOLS = [
         description: '重新加载当前场景（保留编辑器状态）。用于外部改了 prefab 文件后让编辑器重新读取。',
         inputSchema: { type: 'object', properties: {} },
         op: 'scene.reload',
-        safety: 'write',
+        safety: 'danger',
         timeoutMs: 60000,
     }),
     T('scene.close', {
@@ -137,7 +137,7 @@ const EDITOR_TOOLS = [
         description: '关闭当前打开的场景（编辑器会回到没有场景的状态）。慎用：未保存的改动会丢失。',
         inputSchema: { type: 'object', properties: {} },
         op: 'scene.close',
-        safety: 'write',
+        safety: 'danger',
     }),
     T('scene.status', {
         title: '场景状态',
@@ -252,7 +252,7 @@ const EDITOR_TOOLS = [
                 return tool.handler ? await tool.handler(op.args || {}, ctx) : await ctx.call(tool.op, op.args || {});
             };
 
-            const r = await runTransaction(ops, ctx, { execute });
+            const r = await runTransaction(ops, ctx, { execute, rollback: ctx.rollbackEnabled !== false });
             if (!r.ok) {
                 // 事务失败要作为工具错误抛出去，让 MCP 客户端看到 isError。
                 // ⚠️ 回滚结果必须写进错误信息 —— 模型要靠它判断「场景现在脏不脏」，
@@ -317,7 +317,10 @@ const EDITOR_TOOLS = [
     }),
     T('node.move', {
         title: '移动节点',
-        description: '把节点挂到另一个父节点下（改变层级）。',
+        description:
+            '把节点挂到另一个父节点下（改变层级）。\n' +
+            'node / parent 都可以传 uuid、层级路径（Canvas/Panel）或节点名。\n' +
+            '注意：父节点若挂了 cc.Layout 或 cc.Widget，层级变化后子节点位置会被它们接管。',
         inputSchema: {
             type: 'object',
             properties: { node: { type: 'string' }, parent: { type: 'string' } },
@@ -357,6 +360,42 @@ const EDITOR_TOOLS = [
     }),
 
     // ────────────────────────── 组件 ──────────────────────────
+    T('node.clipboard', {
+        title: '节点剪贴板',
+        description:
+            '节点的复制 / 剪切 / 粘贴。action 取值：copy（复制）、cut（剪切）、paste（粘贴）。\n' +
+            'copy 只需要 node；cut 需要 node（会把节点移出层级，**破坏性**，要 confirm=true）；' +
+            'paste 需要 node（被粘贴的源）和 target（粘贴到哪个父节点）。\n' +
+            '粘贴后返回新节点 uuid 列表。',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                action: { type: 'string', enum: ['copy', 'cut', 'paste'] },
+                node: { type: 'string', description: '操作哪个节点' },
+                target: { type: 'string', description: 'paste 时粘贴到哪个父节点（action=paste 时必填）' },
+                confirm: { type: 'boolean', const: true, description: 'action=cut 时必须显式传 true' },
+            },
+            required: ['action', 'node'],
+        },
+        handler: async (args, ctx) => {
+            if (args.action === 'cut' && args.confirm !== true) {
+                throw new Error(
+                    '剪切（cut）会把节点从场景层级里移走，属于破坏性操作，必须显式传 confirm=true。' +
+                    '如果只是想复制一份，请用 action="copy"。'
+                );
+            }
+            if (args.action === 'paste' && !args.target) {
+                throw new Error('粘贴（paste）必须指定 target（粘贴到哪个父节点）。');
+            }
+            return await ctx.call('node.clipboard', {
+                action: args.action,
+                node: args.node,
+                target: args.target,
+            });
+        },
+        safety: 'write',
+    }),
+
     T('component.add', {
         title: '挂组件',
         description:
@@ -481,7 +520,9 @@ const EDITOR_TOOLS = [
     }),
     T('asset.move', {
         title: '移动/重命名资源',
-        description: '把资源移动到新路径（等价于重命名）。',
+        description:
+            '把资源移动到新路径（等价于重命名）。from / to 都用 db://assets/xxx 形式。\n' +
+            '跨目录移动时目标目录必须已存在；移动后旧路径不再有该资源。',
         inputSchema: {
             type: 'object',
             properties: { from: { type: 'string' }, to: { type: 'string' } },
@@ -516,6 +557,35 @@ const EDITOR_TOOLS = [
         inputSchema: { type: 'object', properties: { uuid: { type: 'string' } }, required: ['uuid'] },
         op: 'asset.url',
     }),
+    T('asset.copy', {
+        title: '复制资源',
+        description: '把资源复制到另一个路径（from / to 都用 db://assets/xxx 形式）。原资源保留。',
+        inputSchema: {
+            type: 'object',
+            properties: { from: { type: 'string' }, to: { type: 'string' } },
+            required: ['from', 'to'],
+        },
+        op: 'asset.copy',
+        safety: 'write',
+    }),
+    T('asset.path', {
+        title: '资源本地路径',
+        description: '把资源 URL 转成本地文件系统路径（用于知道文件在磁盘哪儿）。',
+        inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+        op: 'asset.path',
+    }),
+    T('asset.users', {
+        title: '资源被谁引用',
+        description:
+            '反查：哪些资源或脚本引用了这个资源。\n' +
+            'type 可选：asset（默认）/ script / all。改动共享资源前先用它评估影响面。',
+        inputSchema: {
+            type: 'object',
+            properties: { url: { type: 'string' }, type: { type: 'string', enum: ['asset', 'script', 'all'] } },
+            required: ['url'],
+        },
+        op: 'asset.users',
+    }),
     T('asset.dependencies', {
         title: '资源依赖',
         description: '查一个资源依赖了哪些资源（贴图、预制体、脚本）。',
@@ -529,6 +599,18 @@ const EDITOR_TOOLS = [
         description: '获取当前预览服务器的 URL（浏览器预览地址）。',
         inputSchema: { type: 'object', properties: {} },
         op: 'preview.url',
+    }),
+    T('view.align', {
+        title: '对齐视图',
+        description:
+            '对齐场景视图与节点。mode 取值：with-view（把视图的相机位姿应用到选中节点）、' +
+            'view-with-node（把节点位姿应用到视图）。',
+        inputSchema: {
+            type: 'object',
+            properties: { mode: { type: 'string', enum: ['with-view', 'view-with-node'] } },
+        },
+        op: 'view.align',
+        safety: 'write',
     }),
     T('view.focus', {
         title: '镜头对准节点',
@@ -632,6 +714,21 @@ const EDITOR_TOOLS = [
         op: 'reference.add',
         safety: 'write',
     }),
+    T('reference.set', {
+        title: '设置参考图变换',
+        description:
+            '调整当前叠加的参考图。key 取值：path（换图）/ x / y（位置）/ sx / sy（缩放）/ opacity（透明度）。',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                key: { type: 'string', enum: ['path', 'x', 'y', 'sx', 'sy', 'opacity'] },
+                value: { description: '新值' },
+            },
+            required: ['key', 'value'],
+        },
+        op: 'reference.set',
+        safety: 'write',
+    }),
     T('reference.current', {
         title: '当前参考图',
         description: '读取当前叠加在场景视图里的参考图信息（路径 / 位置 / 缩放 / 透明度）。',
@@ -680,6 +777,90 @@ const EDITOR_TOOLS = [
             });
         },
         safety: 'danger',
+    }),
+
+    T('preferences.get', {
+        title: '读编辑器偏好',
+        description:
+            '读取 Cocos 编辑器的偏好设置。name 是偏好分类（如 "general"、"preview"、"inspector"），' +
+            'key 可选（不传返回整类）；protocol 取 "default" / "global" / "local"。',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                name: { type: 'string' },
+                key: { type: 'string' },
+                protocol: { type: 'string', enum: ['default', 'global', 'local'] },
+            },
+            required: ['name'],
+        },
+        op: 'preferences.get',
+    }),
+    T('preferences.set', {
+        title: '写编辑器偏好',
+        description:
+            '修改 Cocos 编辑器的偏好设置。name 是偏好分类，key 是条目名，value 是新值，' +
+            'protocol 取 "default" / "global" / "local"。会立即生效。',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                name: { type: 'string' },
+                key: { type: 'string' },
+                value: {},
+                protocol: { type: 'string', enum: ['default', 'global', 'local'] },
+            },
+            required: ['name', 'key', 'value'],
+        },
+        op: 'preferences.set',
+        safety: 'write',
+    }),
+    T('project.config', {
+        title: '读项目配置',
+        description: '读取当前 Cocos 工程的项目级配置（键值对）。具体有哪些键取决于工程设置。',
+        inputSchema: { type: 'object', properties: { key: { type: 'string' } } },
+        op: 'project.config',
+    }),
+
+    T('scene.script', {
+        title: '场景进程脚本',
+        description:
+            '在 Cocos 的**场景/渲染进程**里执行扩展脚本的固定方法（那里才有 cc 引擎运行时）。\n' +
+            'method 可选：getSceneSummary（场景概览）/ findNodesByName（按名字找节点）/ ' +
+            'getNodeInfo（节点引擎级信息）/ getWorldBounds（世界包围盒）/ ' +
+            'setNodeProperty（按引擎类型写属性）/ createNode（建节点）。\n' +
+            '⚠️ 只开放上面这几个方法，没有通用 eval —— 但 setNodeProperty / createNode ' +
+            '确实能改场景，属于破坏性操作，必须传 confirm=true。',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                method: {
+                    type: 'string',
+                    enum: ['getSceneSummary', 'findNodesByName', 'getNodeInfo', 'getWorldBounds', 'setNodeProperty', 'createNode'],
+                },
+                args: { type: 'array', items: {}, description: '传给该方法的参数列表' },
+                extension: { type: 'string', description: '扩展包名，默认 cocos-mcp' },
+                confirm: { type: 'boolean', const: true, description: '破坏性方法（setNodeProperty / createNode）必须显式传 true' },
+            },
+            required: ['method'],
+        },
+        handler: async (args, ctx) => {
+            const MUTATING = new Set(['setNodeProperty', 'createNode']);
+            if (MUTATING.has(args.method) && args.confirm !== true) {
+                throw new Error(
+                    `场景脚本方法 "${args.method}" 会修改场景，必须显式传 confirm=true。` +
+                    '只读方法（getSceneSummary / findNodesByName / getNodeInfo / getWorldBounds）不需要。'
+                );
+            }
+            // ⚠️ extension 必须一起转发 —— schema 声明了它，丢掉就是「传了没效果」。
+            return await ctx.call('scene.script', {
+                method: args.method,
+                args: args.args || [],
+                extension: args.extension,
+            });
+        },
+        // ⚠️ 不是 danger —— 只读方法（getSceneSummary / findNodesByName / getNodeInfo /
+        //    getWorldBounds）不需要 confirm，而 danger 门禁会在 handler 之前
+        //    把所有调用都拦掉，与描述自相矛盾。危险分级交给 handler 里的 MUTATING 集合。
+        safety: 'write',
     }),
 
     T('editor.info', {

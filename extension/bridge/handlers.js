@@ -106,7 +106,7 @@ function matchNodes(flat, ref) {
 /**
  * 场景树缓存
  * ---------------------------------------------------------------------------
- * 节点解析（uuid / 路径 / 名字）都需要场景树。场景树��询一次要几十毫秒，
+ * 节点解析（uuid / 路径 / 名字）都需要场景树。场景树查询一次要几十毫秒，
  * 而一个典型工作流里会连续解析好几个节点 —— 所以缓存 2 秒。
  * 任何写操作（建/删/移节点、改属性、场景生命周期）都会让缓存失效。
  */
@@ -235,6 +235,35 @@ function createHandlers(ctx) {
      * 不做这层的话，缺参数会一路传到编辑器，回来一句没头没脑的 "parameter error"，
      * 模型根本不知道是自己少传了东西。这里在编辑器之前就拦下并说清楚。
      */
+    /**
+     * 资源 url 必须是 db://assets/ 前缀 ——
+     * 否则等于把「任意路径写文件」的能力透给模型。
+     */
+    function requireAssetUrl(url) {
+        if (typeof url !== 'string' || !url.startsWith('db://assets/')) {
+            throw new Error(
+                `资源路径必须以 "db://assets/" 开头，收到 "${url}"。` +
+                '（防止把项目外的路径透给编辑器。）'
+            );
+        }
+        if (url.includes('..')) {
+            throw new Error(`资源路径不允许包含 ".."：${url}`);
+        }
+    }
+
+    /** 取节点的父节点 uuid（根节点返回场景根自身）。 */
+    async function getParentUuid(ctx, uuid) {
+        const tree = await ctx.msg('scene', 'query-node-tree');
+        const flat = slimNode(tree);
+        const self = flat.find((n) => n.uuid === uuid);
+        if (!self) return uuid;
+        const idx = self.path.split('/').length - 1;
+        if (idx <= 0) return flat[0] ? flat[0].uuid : uuid;
+        const parentPath = self.path.split('/').slice(0, -1).join('/');
+        const parent = flat.find((n) => n.path === parentPath);
+        return parent ? parent.uuid : uuid;
+    }
+
     function req(args, names, tool) {
         const missing = names.filter((n) => args[n] === undefined || args[n] === null || args[n] === '');
         if (missing.length) {
@@ -298,7 +327,38 @@ function createHandlers(ctx) {
                 throw err;
             }
             const list = Array.isArray(args.args) ? args.args : args.args === undefined ? [] : [args.args];
+            // 写类消息会改场景 → 缓存必须失效（透传绕过了高层封装，最容易漏）
+            if (!v.readonly) invalidateTree();
+            if (!v.readonly) {
+                // 写类消息加超时兜底：Cocos 有些消息失败时既不 resolve 也不 reject
+                return await send(args.channel, args.message, list, {
+                    timeoutMs: 30000,
+                    timeoutHint: '该编辑器消息可能不回话（Cocos 某些消息失败时不 resolve 也不 reject）。',
+                });
+            }
             return await ctx.msg(args.channel, args.message, ...list);
+        },
+
+        /**
+         * 在场景进程执行扩展脚本里的白名单方法。
+         *
+         * ⚠️ 官方 API `scene:execute-scene-script` 是「在渲染进程跑扩展脚本」的通道 ——
+         *    不做方法白名单，模型就等于拿到任意代码执行。
+         */
+        'scene.script': async (args) => {
+            req(args, ['method'], 'scene.script');
+            const ALLOWED = ['getSceneSummary', 'findNodesByName', 'getNodeInfo', 'getWorldBounds', 'setNodeProperty', 'createNode'];
+            if (!ALLOWED.includes(args.method)) {
+                throw new Error(`场景脚本方法 "${args.method}" 不在白名单内。可用：${ALLOWED.join('、')}`);
+            }
+            const name = args.extension || 'cocos-mcp';
+            invalidateTree();
+            return await send(
+                'scene',
+                'execute-scene-script',
+                [{ name, method: args.method, args: args.args || [] }],
+                { timeoutMs: 20000, timeoutHint: '场景进程可能正忙，稍后再试。' }
+            );
         },
 
         'editor.info': async () => ({
@@ -387,7 +447,7 @@ function createHandlers(ctx) {
                 'open-scene',
                 [args.uuid],
                 {
-                    timeoutMs: 60000,
+                    timeoutMs: 90000,
                     timeoutHint:
                         '常见原因：场景资源刚创建、引擎还在导入（渲染进程取 import://<uuid>.json 失败，' +
                         '编辑器内部会打 “SceneFacadeManager.openScene timeout”）。等几秒后重试，' +
@@ -456,11 +516,20 @@ function createHandlers(ctx) {
                 },
             ]);
             const created = [];
+            const failed = [];
             for (const comp of args.components || []) {
-                await send('scene', 'create-component', [{ uuid, component: comp }]);
-                created.push(comp);
+                try {
+                    await send('scene', 'create-component', [{ uuid, component: comp }]);
+                    created.push(comp);
+                } catch (e) {
+                    // ⚠️ 组件挂载失败**不能**让整次建节点失败。
+                    // 例如 cc.Canvas 会自动带 UITransform，再显式挂一次会报
+                    // "already contains the same component" —— 节点其实建好了，
+                    // 却因为这一个组件被整体判为失败，调用方会误以为节点没建成。
+                    failed.push({ component: comp, reason: e.message });
+                }
             }
-            return { uuid, name: args.name, components: created };
+            return { uuid, name: args.name, components: created, componentErrors: failed };
         },
 
         'node.delete': async (args) => {
@@ -528,9 +597,16 @@ function createHandlers(ctx) {
         },
 
         'node.clipboard': async (args) => {
+            // paste 会新建节点 → 场景树缓存必须失效，
+            // 否则紧接着用新节点名调用其它工具会命中 2 秒内的旧树，报「找不到节点」。
+            invalidateTree();
             const uuid = await resolveNode(ctx, args.node);
             if (args.action === 'copy') return { copied: await send('scene', 'copy-node', [uuid]) };
-            if (args.action === 'cut') return { cut: await send('scene', 'cut-node', [{ parent: uuid, uuids: uuid }]) };
+            if (args.action === 'cut') {
+                // ⚠️ cut-node 的 parent 要传**该节点的父节点**，不是它自己
+                const parentUuid = await getParentUuid(ctx, uuid);
+                return { cut: await send('scene', 'cut-node', [{ parent: parentUuid, uuids: uuid }]) };
+            }
             const target = await resolveNode(ctx, args.target);
             return { pasted: await send('scene', 'paste-node', [{ target, uuids: uuid }]) };
         },
@@ -599,6 +675,8 @@ function createHandlers(ctx) {
 
         'component.call': async (args) => {
             req(args, ['node', 'method'], 'component.call');
+            // 组件方法可能改场景（脚本里可以增删节点）→ 缓存失效
+            invalidateTree();
             const uuid = await resolveNode(ctx, args.node);
             const r = await send('scene', 'execute-component-method', [
                 { uuid, name: args.method, args: args.args || [] },
@@ -624,18 +702,21 @@ function createHandlers(ctx) {
 
         'asset.create': async (args) => {
             req(args, ['url'], 'asset.create');
+            requireAssetUrl(args.url);
             const r = await send('asset-db', 'create-asset', [args.url, args.content === undefined ? null : args.content]);
             return { created: args.url, info: r };
         },
 
         'asset.save': async (args) => {
             req(args, ['url', 'content'], 'asset.save');
+            requireAssetUrl(args.url);
             const r = await send('asset-db', 'save-asset', [args.url, args.content]);
             return { saved: args.url, info: r };
         },
 
         'asset.delete': async (args) => {
             req(args, ['url'], 'asset.delete');
+            requireAssetUrl(args.url);
             const r = await send('asset-db', 'delete-asset', [args.url]);
             // delete-asset 找不到资源时返回 null 而不是报错 —— 明确告诉调用方「没删掉」
             if (r === null || r === undefined) {
@@ -646,6 +727,8 @@ function createHandlers(ctx) {
 
         'asset.move': async (args) => {
             req(args, ['from', 'to'], 'asset.move');
+            requireAssetUrl(args.from);
+            requireAssetUrl(args.to);
             const r = await send('asset-db', 'move-asset', [args.from, args.to]);
             return { from: args.from, to: args.to, info: r };
         },
@@ -687,8 +770,14 @@ function createHandlers(ctx) {
         'build.start': async (args) => {
             req(args, ['platform'], 'build.start');
             const options = args.options || {};
-            await send('builder', 'add-task', [options, args.shouldWait !== false]);
-            return { started: true, platform: args.platform || null };
+            // ⚠️ shouldWait 默认 true 会让这条消息在整个构建期间不返回 ——
+            //    既占住一个 HTTP 连接（禁用扩展会挂死），也会撞上客户端超时。
+            const shouldWait = args.shouldWait === true;
+            await send('builder', 'add-task', [options, shouldWait], {
+                timeoutMs: shouldWait ? 600000 : 30000,
+                timeoutHint: shouldWait ? '' : '构建是异步的，用 build.status 轮询进度。',
+            });
+            return { started: true, platform: args.platform || null, shouldWait };
         },
         'build.status': async (args) => send('builder', 'query-tasks-info', [{ type: args.type || 'build' }]),
         'build.platforms': async () => send('builder', 'query-platform-config', ['web-desktop']),
@@ -778,10 +867,36 @@ function createHandlers(ctx) {
         },
 
         // ── 偏好 / 项目 ──
-        'preferences.get': async (args) => send('preferences', 'query-config', [args.name, args.key, args.protocol]),
-        'preferences.set': async (args) =>
-            await send('preferences', 'set-config', [args.name, args.key, args.value, args.protocol]),
-        'project.config': async (args) => send('project', 'query-config', [args.key]),
+        'preferences.get': async (args) => {
+            req(args, ['name'], 'preferences.get');
+            const v = await send('preferences', 'query-config', [args.name, args.key, args.protocol]);
+            if (v === null || v === undefined) {
+                throw new Error(
+                    `没有读到偏好 "${args.name}${args.key ? '/' + args.key : ''}"。` +
+                    '该分类可能不存在 —— 实测存在的分类有：preview / inspector / engine。'
+                );
+            }
+            return v;
+        },
+        'preferences.set': async (args) => {
+            req(args, ['name', 'key', 'value'], 'preferences.set');
+            const ok = await send('preferences', 'set-config', [args.name, args.key, args.value, args.protocol]);
+            // set-config 返回 false 表示没写进去 —— 这是「假成功」，必须报错而不是默默返回
+            if (ok === false) {
+                throw new Error(
+                    `写偏好 "${args.name}/${args.key}" 失败（编辑器返回 false）。` +
+                    '常见原因：分类名或键名不存在，或该偏好只读。'
+                );
+            }
+            return { name: args.name, key: args.key, value: args.value, applied: true };
+        },
+        'project.config': async (args) => {
+            const v = await send('project', 'query-config', [args.key]);
+            if (v === null || v === undefined) {
+                throw new Error(`没有读到项目配置 "${args.key}"。该键可能不存在。`);
+            }
+            return v;
+        },
     };
 
     return ops;

@@ -76,7 +76,11 @@ class ToolRegistry {
      */
     _rebuild(force = false) {
         const editors = this.listEditors() || [];
-        const sig = editors.map((e) => `${e.pid}:${e.shortName}`).join('|') + '#' + this.filter;
+        // ⚠️ 签名必须包含 url 与 token：
+        // 扩展的「重启 Bridge」会**重新生成 token 并换端口**，但 pid 与 shortName 不变。
+        // 签名里少了 url/token 的话，_rebuild 会认为「没变化」而保留旧 entry，
+        // 于是之后每次调用都打已经关掉的旧端口 —— hub 永久失联，只能重启 Cocos。
+        const sig = editors.map((e) => `${e.pid}:${e.shortName}:${e.url}:${e.token}`).join('|') + '#' + this.filter;
         if (!force && sig === this._sig && this._byName.size) {
             return this._cache;
         }
@@ -85,7 +89,7 @@ class ToolRegistry {
         if (this.filter) {
             const hit = editors.filter((e) => e.shortName === this.filter);
             if (!hit.length) {
-                // 过滤的实例不在了就退回全部，避免整个服务不可用
+                // 过滤的实例不在了就退回全部，避免整个服务不可用（并记下来，提示里能说明）
                 this._filterMiss = true;
             } else {
                 editors = hit;
@@ -139,12 +143,19 @@ class ToolRegistry {
      */
     async call(name, args = {}) {
         this._rebuild(false);
+        // M11：之前 schema 里声明了 rollback 开关但 handler 从不读它 —— 空承诺。
+        // 现在它真的生效：rollback=false 时不做回滚（并如实告知「场景可能处于中间态」）。
+        this._rollbackEnabled = args.rollback !== false;
         const entry = this._byName.get(name);
         if (!entry) {
             const available = [...this._byName.keys()].slice(0, 40);
-            throw new Error(
+            const err = new Error(
                 `未知工具 "${name}"。当前可用工具（${this._byName.size} 个）示例：${available.join('、')}${available.length < this._byName.size ? ' …' : ''}`
             );
+            // 协议级错误：MCP 规范里「未知工具」属于调用本身有问题，应走 JSON-RPC error，
+            // 客户端据此不会当成「工具跑了但失败」去重试。
+            err.protocolCode = -32602;
+            throw err;
         }
         const { tool, kind } = entry;
         const client = entry.editor ? this.getClient(entry.editor) : null;
@@ -164,6 +175,7 @@ class ToolRegistry {
             },
             listEditors: this.listEditors,
             toolName: name,
+            rollbackEnabled: this._rollbackEnabled !== false,
         };
 
         if (kind === 'global') {

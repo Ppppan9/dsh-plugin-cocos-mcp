@@ -11,10 +11,11 @@
   "scripts": {
     "probe": "node hub/bin.js --probe",
     "tools": "node hub/bin.js --print-tools",
-    "test": "node --test hub/test/*.test.js hub/src/offline/test/*.test.js",
+    "test": "node --test hub/test/*.test.js hub/src/offline/test/*.test.js test/consistency.test.js test/handler-smoke.test.js",
     "install:extension": "node scripts/install-extension.js",
     "test:e2e": "node test/e2e.js",
-    "test:smoke": "node test/tool-smoke.js"
+    "test:smoke": "node test/tool-smoke.js",
+    "gen:readme": "node scripts/gen-readme-tools.js"
   },
   "files": [
     "hub/",

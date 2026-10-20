@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 /**
@@ -30,19 +31,66 @@ function projectRoots(ctx) {
     }
     if (ctx.extraRoots) for (const r of ctx.extraRoots) roots.add(path.resolve(r));
     // 环境变量：允许额外的根目录（美术共享库、跨项目的公共资源目录等）
-    // 格式：冒号分隔的绝对路径，例 COCOS_MCP_EXTRA_ROOTS="/Users/x/ArtLib:/Users/x/Shared"
+    // 格式：冒号分隔的**绝对路径**，例 COCOS_MCP_EXTRA_ROOTS="/Users/x/ArtLib:/Users/x/Shared"
     const env = process.env.COCOS_MCP_EXTRA_ROOTS;
     if (env) {
         for (const part of env.split(':').map((x) => x.trim()).filter(Boolean)) {
-            roots.add(path.resolve(part.replace(/^~(?=$|\/)/, process.env.HOME || '~')));
+            // 只支持 `~`（当前用户家目录），不支持 `~user`（其它用户家目录）
+            // —— 展开 `~user` 会得到一个看似合法的路径，静默放进白名单反而更危险。
+            if (/^~[^/\\]/.test(part)) {
+                throw new Error(
+                    `COCOS_MCP_EXTRA_ROOTS 里的 "${part}" 不是合法的路径：` +
+                    '只支持 `~`（当前用户家目录）或绝对路径，不支持 `~其它用户` 形式。'
+                );
+            }
+            const expanded = part.startsWith('~/') || part === '~'
+                ? path.join(os.homedir(), part.slice(1))
+                : part;
+            if (!path.isAbsolute(expanded)) {
+                // 相对路径会按 cwd 解析 —— 进程工作目录不确定，静默接受等于白给。
+                throw new Error(
+                    `COCOS_MCP_EXTRA_ROOTS 里的 "${part}" 不是绝对路径。` +
+                    '请写成绝对路径（可用 ~ 表示当前用户家目录）。'
+                );
+            }
+            roots.add(path.resolve(expanded));
         }
     }
     return [...roots];
 }
 
 /**
+ * 求「尽可能真实」的路径：把已存在的部分逐段 realpath 掉，
+ * 不存在的尾部按字面拼上。
+ *
+ * 为什么需要：path.resolve 只做**词法**折叠，符号链接原样保留。
+ * 项目里放一个 `assets_link -> ~/.ssh` 的软链，词法判断会认为
+ * `<项目>/assets_link/id_rsa` 在项目内 → 实际读的是项目外。
+ */
+function realpathBestEffort(target) {
+    const abs = path.resolve(target);
+    const parts = abs.split(path.sep);
+    let cur = parts[0] === '' ? path.sep : parts[0];
+    const trailing = [];
+    for (let i = 1; i < parts.length; i++) {
+        const next = path.join(cur, parts[i]);
+        try {
+            cur = fs.realpathSync(next);
+        } catch (_) {
+            // 这一段不存在（或没权限），后面的按字面拼
+            cur = next;
+            trailing.length = 0;
+            for (let j = i + 1; j < parts.length; j++) trailing.push(parts[j]);
+            break;
+        }
+    }
+    return trailing.length ? path.join(cur, ...trailing) : cur;
+}
+
+/**
  * 断言 target 落在某个项目根目录内。
- * 防的是「模型给一个 /etc/passwd 或 ~/.ssh/id_rsa，让工具去读/写」。
+ * 防的是「模型给一个 /etc/passwd 或 ~/.ssh/id_rsa，让工具去读/写」，
+ * 以及通过**符号链接**绕过。
  */
 function assertInsideProject(ctx, target, label = '文件路径') {
     const resolved = path.resolve(target);
@@ -53,8 +101,11 @@ function assertInsideProject(ctx, target, label = '文件路径') {
             `请先用 cocos_prefab_* 之外的方式确认项目路径，或先打开 Cocos Creator（扩展会注册项目目录）。`
         );
     }
+    // 词法判断 + 真实路径判断，两者都要过
+    const realTarget = realpathBestEffort(resolved);
     for (const root of roots) {
-        const rel = path.relative(root, resolved);
+        const realRoot = realpathBestEffort(root);
+        const rel = path.relative(realRoot, realTarget);
         if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
             return resolved;
         }
@@ -199,7 +250,13 @@ const GLOBAL_TOOLS = [
         handler: async (args, ctx) => {
             const offline = requireOffline();
             const filePath = assertInsideProject(ctx, args.filePath, 'prefab 路径');
-            return offline.editPrefab({ filePath, ops: args.ops, dryRun: !!args.dryRun });
+            assertOpPathsInsideProject(ctx, args.ops, 'op 内路径');
+            return offline.editPrefab({
+                filePath,
+                ops: args.ops,
+                dryRun: !!args.dryRun,
+                allowedRoots: projectRoots(ctx),
+            });
         },
         safety: 'write',
     }),
@@ -220,22 +277,55 @@ const GLOBAL_TOOLS = [
         handler: async (args, ctx) => {
             const offline = requireOffline();
             const opsJsonPath = assertInsideProject(ctx, args.opsJsonPath, 'ops 文件路径');
-            return offline.batchPrefab({ opsJsonPath, dryRun: !!args.dryRun });
+            return offline.batchPrefab({
+                opsJsonPath,
+                dryRun: !!args.dryRun,
+                allowedRoots: projectRoots(ctx),
+            });
         },
         safety: 'write',
     }),
 
     T('cocos_prefab_ops', {
         title: '可用 prefab op 清单',
-        description: '列出 cocos_prefab_edit / cocos_prefab_batch 支持的全部 op、必填参数与可选参数。不需要参数。',
+        description:
+            '列出 cocos_prefab_edit / cocos_prefab_batch 支持的全部 **prefab** op、必填参数与可选参数。' +
+            '不确定某个操作叫什么名字时先查这里。动画相关 op 见 cocos_anim_ops。不需要参数。',
         inputSchema: { type: 'object', properties: {} },
         handler: async () => {
             const offline = getOffline();
             if (!offline) {
                 return { error: '离线模块不可用', ops: [] };
             }
-            const ops = offline.listOps();
+            const ops = offline.listOps('prefab');
             return {
+                domain: 'prefab',
+                count: ops.length,
+                ops: ops.map((o) => ({
+                    name: o.name,
+                    required: o.required,
+                    optional: o.optional,
+                    description: o.description,
+                    mutates: o.mutates,
+                })),
+            };
+        },
+    }),
+
+    T('cocos_anim_ops', {
+        title: '可用动画 op 清单',
+        description:
+            '列出 cocos_anim_batch 支持的全部 **动画** op、必填参数与可选参数。' +
+            'prefab 相关 op 见 cocos_prefab_ops。不需要参数。',
+        inputSchema: { type: 'object', properties: {} },
+        handler: async () => {
+            const offline = getOffline();
+            if (!offline) {
+                return { error: '离线模块不可用', ops: [] };
+            }
+            const ops = offline.listOps('anim');
+            return {
+                domain: 'anim',
                 count: ops.length,
                 ops: ops.map((o) => ({
                     name: o.name,
@@ -291,4 +381,33 @@ const GLOBAL_TOOLS = [
     }),
 ];
 
-module.exports = { GLOBAL_TOOLS, assertInsideProject, projectRoots };
+/**
+ * op **内部**携带的路径同样必须过护栏。
+ *
+ * 顶层 filePath 过了护栏不代表 op 里的路径也过了 ——
+ * `ensure-meta.path` / `add-nested-prefab.prefabPath` /
+ * `replace-nested-prefab.prefabPath` 都能指向项目外的任意文件，
+ * 造成「项目外任意写」与「项目外任意读」。
+ */
+const OP_PATH_FIELDS = [
+    { op: 'ensure-meta', field: 'path' },
+    { op: 'add-nested-prefab', field: 'prefabPath' },
+    { op: 'replace-nested-prefab', field: 'prefabPath' },
+];
+
+function assertOpPathsInsideProject(ctx, ops, label = 'op 内路径') {
+    if (!Array.isArray(ops)) return;
+    for (const op of ops) {
+        if (!op || typeof op !== 'object') continue;
+        for (const rule of OP_PATH_FIELDS) {
+            if (op.op !== rule.op) continue;
+            // ⚠️ 离线 op 是**扁平**结构：{ op:'ensure-meta', path:'...' }，
+            //    没有 args 嵌套层。之前读 op.args[field] → 永远取不到 → 护栏形同虚设。
+            const p = op[rule.field];
+            if (typeof p !== 'string' || !p) continue;
+            assertInsideProject(ctx, p, `${label}（${rule.op}.${rule.field}）`);
+        }
+    }
+}
+
+module.exports = { GLOBAL_TOOLS, assertInsideProject, assertOpPathsInsideProject, projectRoots, realpathBestEffort };

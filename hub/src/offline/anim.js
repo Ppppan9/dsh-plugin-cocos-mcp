@@ -65,13 +65,27 @@ function channelPath(channel) {
   return '';
 }
 
-function getKeyframes(channel) {
+/**
+ * 取通道的关键帧数组。
+ *
+ * ⚠️ 真实 Cocos 的 .anim 里，`cc.animation.RealTrack._channel` 是
+ * **引用** `{"__id__": N}`（曲线元素在数组另一处），
+ * `VectorTrack._channels` 同理。之前不解引用 → 找不到关键帧 →
+ * offset-curve 静默跳过 → 「报告成功但零改动」。
+ */
+function getKeyframes(channel, data) {
   if (!isPlainObject(channel)) return null;
   const containers = [channel.curve, channel._curve, channel];
   for (const c of containers) {
     if (!isPlainObject(c)) continue;
+    let target = c;
+    // 解引用 {"__id__": N}
+    if (typeof c.__id__ === 'number' && Array.isArray(data)) {
+      target = data[c.__id__];
+      if (!isPlainObject(target)) continue;
+    }
     for (const key of ['data', 'keyframes', '_data', '_keyframes', 'points']) {
-      if (Array.isArray(c[key])) return c[key];
+      if (Array.isArray(target[key])) return target[key];
     }
   }
   return null;
@@ -172,8 +186,14 @@ function handleOffsetCurve(ctx, op) {
     );
   }
   for (const ch of channels) {
-    const kfs = getKeyframes(ch.channel);
-    if (!kfs) continue;
+    const kfs = getKeyframes(ch.channel, ctx.data);
+    if (!kfs) {
+      // 之前是 continue —— 静默跳过 → 报告成功但什么都没改。
+      throw new Error(
+        `anim 通道 "${ch.path}" 解析不到关键帧（${ctx.filePath}）。` +
+        '可能是该通道用了当前实现不支持的曲线形态。'
+      );
+    }
     let touched = 0;
     kfs.forEach((kf, i) => {
       const cur = readKeyValue(kf);
@@ -203,8 +223,14 @@ function handleSetKeyframeValue(ctx, op) {
     );
   }
   for (const ch of channels) {
-    const kfs = getKeyframes(ch.channel);
-    if (!kfs || !kfs.length) continue;
+    const kfs = getKeyframes(ch.channel, ctx.data);
+    if (!kfs) {
+      throw new Error(
+        `anim 通道 "${ch.path}" 解析不到关键帧（${ctx.filePath}）。` +
+        '可能是该通道用了当前实现不支持的曲线形态。'
+      );
+    }
+    if (!kfs.length) continue;
     let target = -1;
     if (typeof op.index === 'number') {
       target = op.index;
@@ -236,7 +262,8 @@ function handleSetCurveChannel(ctx, op) {
   const changes = [];
   for (const ch of allChannels(ctx)) {
     if (ch.path !== op.path) continue;
-    const c = ch.channel;
+    // path 在 track 元素上（ch.element），不在 channel 引用上
+    const c = ch.element || ch.channel;
     const before = channelPath(c);
     if (typeof c.path === 'string') c.path = op.newPath;
     else if (typeof c._path === 'string') c._path = op.newPath;

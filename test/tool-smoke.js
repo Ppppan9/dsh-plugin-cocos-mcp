@@ -175,6 +175,7 @@ async function main() {
     await check('cocos_knowledge', { topic: 'messages' });
     await check('cocos_knowledge', { topic: 'traps' });
     await check('cocos_prefab_ops', {});
+    await check('cocos_anim_ops', {});
     // 路径护栏：越界必须被拒
     await check('cocos_prefab_query', { filePath: '/etc/passwd', selector: 'tree' }, { expectError: true });
     await check('cocos_prefab_edit', { filePath: '/tmp/x.prefab', ops: [{ op: 'set-active', node: 'a', active: false }] }, { expectError: true });
@@ -206,6 +207,7 @@ async function main() {
     await check('node.transform', { node: tempNodeUuid || 'Scene', position: { x: 1, y: 2 } });
     await check('node.duplicate', { node: tempNodeUuid || 'Scene' });
     await check('node.move', { node: tempNodeUuid || 'Scene', parent: 'Scene' });
+    await check('node.clipboard', { action: 'copy', node: tempNodeUuid || 'Scene' });
     await check('component.list', { node: tempNodeUuid || 'Scene' });
     await check('component.set', { node: tempNodeUuid || 'Scene', component: 'cc.Label', property: 'string', value: 'smoke' });
     await check('component.add', { node: tempNodeUuid || 'Scene', component: 'cc.Button' });
@@ -228,6 +230,8 @@ async function main() {
         const uuidRes = await client.call('asset.uuid', { url: sceneUrl });
         await check('asset.url', { uuid: uuidRes.data && uuidRes.data.uuid ? uuidRes.data.uuid : uuidRes.data });
         await check('asset.dependencies', { url: sceneUrl });
+    await check('asset.path', { url: sceneUrl });
+    await check('asset.users', { url: sceneUrl });
     } else {
         log('  ⚠️  工程里没有 .scene 资源，跳过 asset.info/uuid/url/dependencies');
         await check('asset.info', { url: 'db://assets/__no_such__.scene' }, { expectError: true });
@@ -240,6 +244,8 @@ async function main() {
         await check('asset.save', { url: tmpAsset, content: '{"smoke":2}' });
         await check('asset.reimport', { url: tmpAsset });
         await check('asset.refresh', { url: tmpAsset });
+        await check('asset.copy', { from: tmpAsset, to: 'db://assets/__smoke_tmp_copy.json' });
+        await check('asset.delete', { url: 'db://assets/__smoke_tmp_copy.json', confirm: true });
         await check('asset.move', { from: tmpAsset, to: 'db://assets/__smoke_tmp2.json' });
         await check('asset.delete', { url: 'db://assets/__smoke_tmp2.json', confirm: true });
     }
@@ -248,6 +254,7 @@ async function main() {
     console.log('\n▸ 5. 视图 / 预览 / 构建 / 参考图');
     await check('view.options', {});
     await check('view.focus', { nodes: ['Scene'] });
+    await check('view.align', { mode: 'view-with-node' });
     await check('preview.url', {});
     await check('build.status', { type: 'build' });
     await check('build.platforms', {});
@@ -256,6 +263,7 @@ async function main() {
     const refPath = path.join(os.tmpdir(), '__smoke_ref.png');
     fs.writeFileSync(refPath, Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6300010000050001', 'hex'));
     await check('reference.add', { paths: [refPath] });
+    await check('reference.set', { key: 'opacity', value: 0.5 });
     await check('reference.remove', { paths: [refPath] });
     await check('reference.add', { paths: ['/tmp/definitely-not-there.png'] }, { expectError: true }); // 文件不存在要被拦
     if (WITH_BUILD) {
@@ -267,11 +275,22 @@ async function main() {
     // ── 6. 编辑器 ──
     console.log('\n▸ 6. 编辑器');
     await check('editor.info', {});
+    await check('scene.script', { method: 'getSceneSummary', args: [], confirm: true });
+    await check('scene.script', { method: '不在白名单里的方法', args: [], confirm: true }, { expectError: true });
     await check('cocos_message', { channel: 'scene', message: 'query-is-ready', args: [], confirm: true });
     await check('cocos_message', { channel: 'scene', message: '不存在的消息', args: [], confirm: true }, { expectError: true });
     await check('editor.logs', { limit: 5 });
     await check('editor.logs', { level: ['error'], limit: 5 });
     await check('editor.console.clear', {});
+    // 实测存在的偏好分类：preview / inspector / engine（general 不存在）
+    await check('preferences.get', { name: 'preview' });
+    await check('preferences.get', { name: '__不存在的分类__' }, { expectError: true });
+    // 用不存在的分类 → 应该报错（set-config 对未知分类返回 false → 明确报错）
+    await check('preferences.set', { name: '__不存在的分类__', key: 'k', value: 1 }, { expectError: true });
+    // 真实存在分类的正常写入
+    await check('preferences.set', { name: 'preview', key: '__smoke_probe__', value: 1 });
+    await check('project.config', { key: 'engine' });
+    await check('project.config', { key: '__不存在的键__' }, { expectError: true });
 
     // ── 7. 场景生命周期（会改当前场景，放最后）──
     console.log('\n▸ 7. 场景生命周期');
@@ -283,7 +302,7 @@ async function main() {
         await check('scene.open', { uuid: u.data && u.data.uuid ? u.data.uuid : u.data });
         await new Promise((r) => setTimeout(r, 1800));
         await check('scene.save', {});
-        await check('scene.reload', {});
+        await check('scene.reload', { confirm: true });
         await check('asset.delete', { url: cs[0].url, confirm: true });
     } else {
         log('  ⚠️  scene.create 后没查到资源');
@@ -294,7 +313,7 @@ async function main() {
     if (tempNodeUuid) await client.call('node.delete', { node: tempNodeUuid, confirm: true });
     if (tempCanvasUuid) await client.call('node.delete', { node: tempCanvasUuid, confirm: true });
     await check('node.delete', { node: 'Scene', confirm: true }, { expectError: true }); // 根节点不可删
-    await check('scene.close', {});   // 关闭场景放最后
+    await check('scene.close', { confirm: true });   // 关闭场景放最后
 
     // ── 汇总 ──
     const failed = results.filter((r) => r.status !== 'ok');

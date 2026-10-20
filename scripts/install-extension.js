@@ -47,9 +47,11 @@ function main() {
     }
 
     const destDir = path.join(project, 'extensions', 'cocos-mcp');
-    const dest = path.join(destDir, 'cocos-mcp');
-    // 兼容直接以 extensions/cocos-mcp 作为包根的布局
-    const target = fs.existsSync(path.join(destDir, 'package.json')) ? destDir : dest;
+    // 目标永远是 extensions/cocos-mcp。
+    // 之前的逻辑是「destDir 下有 package.json 就装 destDir，否则装 destDir/cocos-mcp」，
+    // 结果**全新安装**会装成 extensions/cocos-mcp/cocos-mcp 的嵌套布局 ——
+    // Cocos 不会把嵌套目录当成扩展根，扩展根本加载不了。
+    const target = destDir;
 
     if (fs.existsSync(target) && !force) {
         console.log(`⚠️  已存在扩展：${target}`);
@@ -59,6 +61,16 @@ function main() {
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.cpSync(SRC, target, { recursive: true });
         console.log(`✅ 扩展已安装到 ${target}`);
+    }
+
+    // 把 hub 的真实路径写进扩展 —— 面板的「复制 MCP 配置」要用它。
+    // 扩展装在 <项目>/extensions/cocos-mcp/，hub 在仓库根，两者不同目录。
+    const hubPath = path.join(__dirname, '..', 'hub', 'bin.js');
+    try {
+        fs.writeFileSync(path.join(target, 'hub-path.txt'), hubPath + '\n', 'utf8');
+        console.log(`  hub 路径已写入：${hubPath}`);
+    } catch (e) {
+        console.log(`  ⚠️  写 hub-path.txt 失败（面板的「复制配置」会提示找不到 hub）：${e.message}`);
     }
 
     // 初始化 .dev 信号目录（扩展的 restart-package 通道用）
