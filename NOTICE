@@ -1,0 +1,46 @@
+cocos-mcp
+Copyright (c) 2026 cocos-mcp contributors
+
+This product includes software developed by the cocos-mcp contributors.
+
+--------------------------------------------------------------------------------
+来源与致谢 / Sources and Attribution
+--------------------------------------------------------------------------------
+
+本项目的设计思路参考了若干开源的 Cocos Creator MCP 项目。**这些项目的代码
+没有被复制进本仓库**；完整的来源清单、借鉴对照表、代码原创性核查数据见
+仓库根目录的 `SOURCES.md`。
+
+调研对象（按调研顺序）：
+
+  DaxianLee/cocos-mcp-server          https://github.com/DaxianLee/cocos-mcp-server
+  listar/cocos-mcp-server              https://github.com/listar/cocos-mcp-server
+  harady/cocos-creator-mcp             https://github.com/harady/cocos-creator-mcp
+  HappyLifeOk/cc-3-8-x-mcp             https://github.com/HappyLifeOk/cc-3-8-x-mcp
+  JoseeRen/cc-3-8-x-mcp               https://github.com/JoseeRen/cc-3-8-x-mcp
+  shiliyu1991-lang/cocos-mcp-3x       https://github.com/shiliyu1991-lang/cocos-mcp-3x
+  lwsinclair/cocosMCP                 https://github.com/lwsinclair/cocosMCP
+  czh2774/cocosMCP                    https://github.com/czh2774/cocosMCP
+
+其中 HappyLifeOk/cc-3-8-x-mcp 与 JoseeRen/cc-3-8-x-mcp 以 Apache License 2.0
+发布；harady/cocos-creator-mcp、shiliyu1991-lang/cocos-mcp-3x、
+lwsinclair/cocosMCP、czh2774/cocosMCP 以 MIT License 发布；
+DaxianLee/cocos-mcp-server 与 listar/cocos-mcp-server 未附带许可证文件
+（默认保留全部著作权）。
+
+若本仓库未来引入了上述 Apache-2.0 项目的任何代码片段，必须同时：
+  1. 保留 Apache-2.0 许可证全文与版权声明；
+  2. 在本文件中注明被引用的文件与改动内容；
+  3. 明确标注对原作品的修改。
+
+--------------------------------------------------------------------------------
+Cocos Creator
+--------------------------------------------------------------------------------
+
+Cocos Creator 是 Beijing Hode Information Technology Co., Ltd. 的产品。
+本项目是第三方社区工具，与 Cocos 官方无隶属或背书关系。
+
+本项目使用的编辑器接口信息来自 Cocos Creator 3.8.8 随包发布的公开类型契约
+（@cocos/creator-types）与 i18n 消息描述表。`extension/templates/empty-scene.scene`
+为空白场景数据模板，其结构由 Cocos Creator 的序列化格式决定、数值为引擎默认配置。
+未包含 Cocos Creator 的任何代码或资源文件。

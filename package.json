@@ -1,0 +1,38 @@
+{
+  "name": "cocos-mcp",
+  "version": "1.0.0",
+  "description": "Cocos Creator 3.8.x 的 MCP（Model Context Protocol）服务：编辑器侧 Bridge + stdio 网关 + 离线 prefab/animation 编辑器 + 知识库",
+  "author": "VberAI Internal",
+  "license": "MIT",
+  "bin": {
+    "cocos-mcp": "./hub/bin.js"
+  },
+  "main": "./hub/bin.js",
+  "scripts": {
+    "probe": "node hub/bin.js --probe",
+    "tools": "node hub/bin.js --print-tools",
+    "test": "node --test hub/test/*.test.js hub/src/offline/test/*.test.js",
+    "install:extension": "node scripts/install-extension.js",
+    "test:e2e": "node test/e2e.js",
+    "test:smoke": "node test/tool-smoke.js"
+  },
+  "files": [
+    "hub/",
+    "extension/",
+    "scripts/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "cocos",
+    "cocos-creator",
+    "mcp",
+    "model-context-protocol",
+    "game-engine",
+    "ai"
+  ],
+  "dependencies": {},
+  "devDependencies": {}
+}

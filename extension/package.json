@@ -1,0 +1,42 @@
+{
+  "name": "cocos-mcp",
+  "version": "1.0.0",
+  "package_version": 2,
+  "displayName": "Cocos MCP Bridge",
+  "title": "Cocos MCP",
+  "description": "为 Cocos Creator 3.8.x 提供 MCP（Model Context Protocol）能力：编辑器侧 Bridge + Node 侧 stdio 网关 + 离线 prefab/animation 编辑器。",
+  "author": "VberAI Internal",
+  "main": "./main.js",
+  "editor": ">=3.8.0",
+  "license": "MIT",
+  "contributions": {
+    "menu": [
+      {
+        "path": "i18n:menu.extension",
+        "label": "Cocos MCP",
+        "items": [
+          { "path": "i18n:menu.extension", "label": "打开面板", "message": "open-panel" },
+          { "path": "i18n:menu.extension", "label": "复制 MCP 配置", "message": "copy-client-config" },
+          { "path": "i18n:menu.extension", "label": "重启 Bridge", "message": "restart-bridge" }
+        ]
+      }
+    ],
+    "messages": {
+      "open-panel": { "methods": ["openPanel"] },
+      "copy-client-config": { "methods": ["copyClientConfig"] },
+      "restart-bridge": { "methods": ["restartBridge"] },
+      "get-bridge-status": { "methods": ["getBridgeStatus"] }
+    },
+    "scene": {
+      "script": "./scene.js"
+    }
+  },
+  "panels": {
+    "default": {
+      "title": "Cocos MCP",
+      "main": "./panels/default/index.js",
+      "flags": { "close": false, "popup": false, "save": true },
+      "size": { "min-width": 360, "min-height": 420, "width": 420, "height": 560 }
+    }
+  }
+}

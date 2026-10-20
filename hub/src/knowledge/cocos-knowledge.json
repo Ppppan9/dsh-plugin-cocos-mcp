@@ -1,0 +1,232 @@
+{
+  "version": "3.8.x",
+  "components": {
+    "cc.UITransform": {
+      "summary": "所有 UI 节点的必需组件，负责尺寸与锚点。2D 项目里没有它节点不会有尺寸。",
+      "properties": {
+        "contentSize": { "type": "cc.Size", "desc": "节点尺寸 {width,height}", "note": "改成 {width,height} 即可，引擎会自动拆成 width/height" },
+        "anchorPoint": { "type": "cc.Vec2", "desc": "锚点 {x,y}，默认 {0.5,0.5}", "note": "0.5 是中心锚点；左对齐界面常用 {0,0.5}" },
+        "priority": { "type": "number", "desc": "渲染优先级，越大越靠上" }
+      }
+    },
+    "cc.Label": {
+      "summary": "文本标签。",
+      "properties": {
+        "string": { "type": "string", "desc": "文本内容" },
+        "fontSize": { "type": "number", "desc": "字号" },
+        "lineHeight": { "type": "number", "desc": "行高" },
+        "horizontalAlign": { "type": "enum", "enum": ["left", "center", "right"], "desc": "水平对齐" },
+        "verticalAlign": { "type": "enum", "enum": ["top", "center", "bottom"], "desc": "垂直对齐" },
+        "overflow": { "type": "enum", "enum": ["none", "shrink", "clip", "ellipsis"], "desc": "溢出处理" },
+        "enableWrapText": { "type": "boolean", "desc": "是否换行" },
+        "color": { "type": "cc.Color", "desc": "颜色 {r,g,b,a}，分量 0-255" },
+        "font": { "type": "cc.Font", "desc": "字体资源" },
+        "bold": { "type": "boolean", "desc": "加粗" }
+      }
+    },
+    "cc.Sprite": {
+      "summary": "2D 图片。",
+      "properties": {
+        "spriteFrame": { "type": "cc.SpriteFrame", "desc": "图片帧，值传 db://assets/xxx 的 uuid 或 spriteFrame 资源" },
+        "sizeMode": { "type": "enum", "enum": ["CUSTOM", "TRIMMED", "RAW"], "desc": "尺寸模式；CUSTOM=用 UITransform 尺寸" },
+        "type": { "type": "enum", "enum": ["SIMPLE", "SLICED", "TILED", "FILLED"], "desc": "渲染模式；九宫格用 SLICED" },
+        "grayscale": { "type": "boolean", "desc": "灰度" },
+        "fillType": { "type": "enum", "enum": ["SIMPLE", "HORIZONTAL", "VERTICAL", "RADIAL"], "desc": "填充方式（type=FILLED 时）" }
+      }
+    },
+    "cc.Button": {
+      "summary": "按钮。",
+      "properties": {
+        "interactable": { "type": "boolean", "desc": "是否可点击" },
+        "transition": { "type": "enum", "enum": ["NONE", "COLOR", "SPRITE", "SCALE"], "desc": "过渡方式" },
+        "clickEvents": { "type": "array", "desc": "点击事件列表" },
+        "target": { "type": "cc.Node", "desc": "过渡目标节点" }
+      },
+      "notes": [
+        "挂 Button 前目标节点必须有 UITransform。",
+        "配点击事件更稳的做法是：在目标节点挂自定义脚本，用 component.call 调用脚本方法，而不是硬编 clickEvents。"
+      ]
+    },
+    "cc.Layout": {
+      "summary": "自动布局容器。",
+      "properties": {
+        "type": { "type": "enum", "enum": ["HORIZONTAL", "VERTICAL", "GRID"], "desc": "布局方向" },
+        "resizeMode": { "type": "enum", "enum": ["NONE", "CHILDREN", "CONTAINER"], "desc": "尺寸自适应策略" },
+        "spacingX": { "type": "number", "desc": "水平间距" },
+        "spacingY": { "type": "number", "desc": "垂直间距" },
+        "paddingLeft": { "type": "number" },
+        "paddingRight": { "type": "number" },
+        "paddingTop": { "type": "number" },
+        "paddingBottom": { "type": "number" },
+        "constraint": { "type": "enum", "enum": ["NONE", "FIXED_COL", "FIXED_ROW"], "desc": "网格约束" },
+        "startAxis": { "type": "enum", "enum": ["HORIZONTAL", "VERTICAL"], "desc": "网格主轴" }
+      },
+      "notes": [
+        "父节点用 Layout 时，子节点不要手动设 position——会被 Layout 覆盖。",
+        "Layout 的 resizeMode=CONTAINER 时容器自身尺寸会跟着子节点变。"
+      ]
+    },
+    "cc.ScrollView": {
+      "summary": "滚动视图。",
+      "properties": {
+        "content": { "type": "cc.Node", "desc": "内容节点（必须指定，否则不滚动）" },
+        "horizontal": { "type": "boolean", "desc": "允许水平滚动" },
+        "vertical": { "type": "boolean", "desc": "允许垂直滚动" },
+        "brake": { "type": "number", "desc": "刹车系数 0-1" },
+        "elastic": { "type": "boolean", "desc": "回弹" }
+      },
+      "notes": [
+        "content 节点的 UITransform 的 anchorPoint 决定滚动方向：设 {0.5,1} 是从顶部开始。"
+      ]
+    },
+    "cc.EditBox": {
+      "summary": "输入框。",
+      "properties": {
+        "string": { "type": "string", "desc": "当前文本" },
+        "placeholder": { "type": "string", "desc": "占位符" },
+        "maxLength": { "type": "number", "desc": "最大长度，-1 不限" },
+        "inputMode": { "type": "enum", "enum": ["ANY", "EMAIL", "NUMERIC", "PHONE_NUMBER", "URL", "DECIMAL", "SINGLE_LINE"], "desc": "键盘类型" },
+        "inputFlag": { "type": "enum", "enum": ["DEFAULT", "PASSWORD", "AUTOCORRECT", "HIDE", "UNSAFE"], "desc": "输入标志" }
+      }
+    },
+    "cc.Toggle": {
+      "summary": "开关/勾选框。",
+      "properties": {
+        "checked": { "type": "boolean", "desc": "是否选中" },
+        "checkMark": { "type": "cc.Node", "desc": "勾选标记节点" },
+        "target": { "type": "cc.Node" }
+      }
+    },
+    "cc.Slider": {
+      "summary": "滑条。",
+      "properties": {
+        "value": { "type": "number", "desc": "当前值（0-1）" },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "handle": { "type": "cc.Node", "desc": "滑块节点" }
+      }
+    },
+    "cc.Widget": {
+      "summary": "自动对齐/拉伸。",
+      "properties": {
+        "isAlignTop": { "type": "boolean" },
+        "isAlignBottom": { "type": "boolean" },
+        "isAlignLeft": { "type": "boolean" },
+        "isAlignRight": { "type": "boolean" },
+        "isAlignHorizontalCenter": { "type": "boolean" },
+        "isAlignVerticalCenter": { "type": "boolean" },
+        "left": { "type": "number" },
+        "right": { "type": "number" },
+        "top": { "type": "number" },
+        "bottom": { "type": "number" }
+      },
+      "notes": ["Widget 会持续驱动节点的位置与尺寸。与 Layout 同用要注意谁在最后生效。"]
+    },
+    "cc.ProgressBar": {
+      "summary": "进度条。",
+      "properties": { "progress": { "type": "number", "desc": "0-1" } }
+    },
+    "cc.RichText": {
+      "summary": "富文本。",
+      "properties": { "string": { "type": "string" }, "maxWidth": { "type": "number" } }
+    },
+    "cc.Canvas": {
+      "summary": "UI 根节点，负责画布缩放与适配。",
+      "properties": {
+        "designResolution": { "type": "cc.Size", "desc": "设计分辨率" },
+        "fitWidth": { "type": "boolean" },
+        "fitHeight": { "type": "boolean" }
+      },
+      "notes": ["新建 UI 场景必须有一个 Canvas 子节点，UI 元素都要放在它下面。"]
+    },
+    "cc.Camera": {
+      "summary": "相机。3D 项目需要；2D 模板自带一个跟随相机。",
+      "properties": { "orthoHeight": { "type": "number" }, "clearFlags": { "type": "enum", "enum": ["NONE", "COLOR", "DEPTH", "COLOR_DEPTH", "SKYBOX", "SOLID_COLOR"] } }
+    },
+    "cc.Animation": {
+      "summary": "动画组件。",
+      "properties": { "clips": { "type": "array", "desc": "动画剪辑列表" }, "playOnLoad": { "type": "boolean" }, "defaultClip": { "type": "string" } }
+    },
+    "cc.AudioSource": {
+      "summary": "音频。",
+      "properties": { "clip": { "type": "cc.AudioClip" }, "loop": { "type": "boolean" }, "volume": { "type": "number" } }
+    }
+  },
+  "coordinates": {
+    "uiLocalVsWorld": {
+      "summary": "UI 节点的 position 是相对父节点的本地坐标；getWorldPosition 才是世界坐标。",
+      "rules": [
+        "position 是本地坐标（相对父节点 UITransform 的锚点对齐后的坐标系）。",
+        "父节点有 Layout / Widget 时，子节点的 position 会被它们覆盖，不要手动改。",
+        "rotation 是四元数；只绕 Z 轴时用 {x:0,y:0,z:sin(r/2),w:cos(r/2)}，本项目 node.transform 的 rotation 参数已帮你转好。"
+      ]
+    },
+    "anchorPoint": {
+      "summary": "锚点决定节点的哪个点位于 position 处，也是父节点坐标系原点的参照。",
+      "rules": [
+        "默认 {0.5,0.5} = 中心锚点。",
+        "左对齐/上对齐的界面常用 {0,0.5}（左中）或 {0,1}（左上）。",
+        "改锚点会改变节点视觉位置，但不会改变 position 的数值。"
+      ]
+    },
+    "designResolution": {
+      "summary": "Canvas 的设计分辨率 + fitWidth/fitHeight 决定 UI 在不同屏幕上的缩放。",
+      "rules": [
+        "fitWidth=true 且 fitHeight=false：宽度铺满，高度按比例伸缩（适合横版、竖版固定宽度）。",
+        "两者都 true：严格按设计分辨率缩放，可能留黑边。",
+        "两者都 false：1:1 像素，多余区域被裁掉。"
+      ]
+    },
+    "zAxis": {
+      "summary": "2D 项目的 z 轴主要决定同级渲染顺序。",
+      "rules": ["同父节点下 z 值大的后渲染（盖在上面）。", "UITransform.priority 也影响渲染顺序，priority 大的靠上。"]
+    }
+  },
+  "layout": {
+    "summary": "布局相关的实操配方。",
+    "recipes": [
+      {
+        "name": "横向排列一排按钮",
+        "steps": [
+          "在 Canvas 下建一个容器节点，挂 cc.UITransform + cc.Layout，type=HORIZONTAL，resizeMode=CONTAINER",
+          "把按钮建为容器的子节点，不要手动设 position",
+          "调 Layout 的 spacingX / paddingLeft / paddingRight"
+        ]
+      },
+      {
+        "name": "网格排列",
+        "steps": ["容器挂 cc.Layout，type=GRID", "设 constraint=FIXED_COL（按列排满换行）或 FIXED_ROW", "设 spacingX / spacingY"]
+      },
+      {
+        "name": "九宫格背景",
+        "steps": ["挂 cc.Sprite 并设置 spriteFrame", "把 Sprite.type 设为 SLICED", "在 SpriteFrame 资源上设置 border 九宫格边距"]
+      },
+      {
+        "name": "自适应铺满",
+        "steps": ["挂 cc.Widget", "勾选 isAlignTop/Bottom/Left/Right，top/bottom/left/right 设为 0", "父节点需要有 UITransform"]
+      }
+    ]
+  },
+  "workflow": {
+    "summary": "推荐的 Cocos 操作顺序，避免返工。",
+    "steps": [
+      "1. scene.tree 先看清现状，别凭空猜节点名",
+      "2. 节点定位统一用 uuid / 层级路径 / 名字三态，不要自己拼 uuid",
+      "3. 改属性用 component.set；改 prefab 资源文件用 cocos_prefab_edit（离线改文件，更安全）",
+      "4. 多步操作有依赖时用 scene.transaction，失败会自动回滚",
+      "5. 改完 scene.save",
+      "6. 离线改了文件后，调用 asset.reimport 让编辑器感知",
+      "7. 出问题先 editor.logs 看日志"
+    ]
+  },
+  "traps": [
+    "Editor.Scene / Editor.Node / Editor.Component / Editor.Pkg 这些 2.x 时代的 API 在 3.8.x 里不存在，只能用 Editor.Message.request(channel, message, ...)。",
+    "scene:set-property 的 path 里组件属性要写成 __comps__.下标.属性名，下标从 0 开始。",
+    "挂 Button/Sprite 前节点必须有 cc.UITransform。",
+    "Label 的 color 分量范围是 0-255，不是 0-1。",
+    "离线改了 .prefab 后编辑器不会自动感知，必须 asset.reimport，否则编辑器下次保存会用旧数据覆盖你的修改。",
+    "嵌套 prefab 里的节点，节点名不在 _name 里，而是在 PrefabInstance 的 propertyOverrides 里；离线工具会自动处理。",
+    "scene:set-property 会触发 undo 记录，批量操作后建议 scene.snapshot + scene.snapshot.abort 做事务边界。",
+    "cc.Label 的 string 属性不是 _string（在 prefab 文件里是 _string，在编辑器 dump 里是 string）。"
+  ]
+}

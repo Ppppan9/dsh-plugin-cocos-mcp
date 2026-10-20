@@ -1,0 +1,185 @@
+{
+  "version": "3.8.8",
+  "note": "以下消息名经过 Cocos Creator 3.8.8 官方类型契约 + app.asar 二进制扫描双重验证。调用不存在的消息会直接报错，因此这份清单就是可用边界。",
+  "channels": {
+    "scene": [
+      "open-scene",
+      "save-scene",
+      "save-as-scene",
+      "close-scene",
+      "set-property",
+      "reset-property",
+      "move-array-element",
+      "remove-array-element",
+      "copy-node",
+      "duplicate-node",
+      "paste-node",
+      "cut-node",
+      "set-parent",
+      "create-node",
+      "remove-node",
+      "reset-node",
+      "reset-component",
+      "restore-prefab",
+      "create-component",
+      "remove-component",
+      "execute-component-method",
+      "execute-scene-script",
+      "snapshot",
+      "snapshot-abort",
+      "soft-reload",
+      "change-gizmo-tool",
+      "query-gizmo-tool-name",
+      "change-gizmo-pivot",
+      "query-gizmo-pivot",
+      "change-gizmo-coordinate",
+      "query-gizmo-coordinate",
+      "change-is2D",
+      "query-is2D",
+      "set-grid-visible",
+      "query-is-grid-visible",
+      "set-icon-gizmo-3d",
+      "query-is-icon-gizmo-3d",
+      "set-icon-gizmo-size",
+      "query-icon-gizmo-size",
+      "focus-camera",
+      "align-with-view",
+      "align-view-with-node",
+      "query-is-ready",
+      "query-node",
+      "query-component",
+      "query-node-tree",
+      "query-nodes-by-asset-uuid",
+      "query-dirty",
+      "query-classes",
+      "query-components",
+      "query-component-has-script",
+      "query-scene-bounds",
+      "is-native"
+    ],
+    "asset-db": [
+      "query-ready",
+      "create-asset",
+      "import-asset",
+      "copy-asset",
+      "move-asset",
+      "delete-asset",
+      "open-asset",
+      "save-asset",
+      "save-asset-meta",
+      "reimport-asset",
+      "refresh-asset",
+      "query-asset-info",
+      "query-missing-asset-info",
+      "query-asset-meta",
+      "query-asset-users",
+      "query-asset-dependencies",
+      "query-path",
+      "query-url",
+      "query-uuid",
+      "query-assets",
+      "generate-available-url"
+    ],
+    "preview": [
+      "query-preview-url",
+      "generate-settings"
+    ],
+    "builder": [
+      "open",
+      "query-worker-ready",
+      "query-tasks-info",
+      "query-task",
+      "add-task",
+      "query-platform-config"
+    ],
+    "preferences": [
+      "open-settings",
+      "query-config",
+      "set-config"
+    ],
+    "project": [
+      "query-config",
+      "set-config",
+      "open-settings"
+    ],
+    "program": [
+      "query-program-info",
+      "open-program",
+      "open-url"
+    ],
+    "programming": [
+      "query-shared-settings",
+      "query-sorted-plugins"
+    ],
+    "engine": [
+      "query-info",
+      "query-engine-info"
+    ],
+    "server": [
+      "query-ip-list",
+      "query-port",
+      "query-sort-ip-list"
+    ],
+    "information": [
+      "query-information",
+      "has-dialog",
+      "close-dialog"
+    ],
+    "device": [
+      "query"
+    ],
+    "extension": [
+      "create-extension-template"
+    ],
+    "console": [
+      "clear"
+    ],
+    "reference-image": [
+      "add-image",
+      "remove-image",
+      "switch-image",
+      "set-image-data",
+      "query-config",
+      "query-current",
+      "refresh"
+    ]
+  },
+  "aliases": {
+    "scene:add-reference-image": "reference-image:add-image",
+    "scene:remove-reference-image": "reference-image:remove-image",
+    "scene:switch-reference-image": "reference-image:switch-image",
+    "scene:refresh-reference-image": "reference-image:refresh",
+    "scene:query-reference-image-config": "reference-image:query-config",
+    "scene:query-current-reference-image": "reference-image:query-current",
+    "scene:set-reference-image-position": "reference-image:set-image-data",
+    "scene:set-reference-image-scale": "reference-image:set-image-data",
+    "scene:set-reference-image-opacity": "reference-image:set-image-data",
+    "scene:clear-all-reference-images": "reference-image:remove-image",
+    "scene:query-grid-visible": "scene:query-is-grid-visible",
+    "scene:query-is-dirty": "scene:query-dirty",
+    "scene:query-node-by-asset-uuid": "scene:query-nodes-by-asset-uuid",
+    "asset-db:query-asset-depends": "asset-db:query-asset-dependencies",
+    "asset-db:query-depends": "asset-db:query-asset-dependencies"
+  },
+  "knownMissing": {
+    "scene:query-performance": "3.8.8 没有场景性能查询消息。请改用 Cocos 预览页的性能面板，或用 preview 工具采集运行时数据。",
+    "scene:query-hierarchy": "3.8.8 没有该消息。请用 scene:query-node-tree。",
+    "scene:check-missing-assets": "3.8.8 没有该消息。请用 asset-db:query-missing-asset-info。",
+    "scene:apply-prefab-link": "3.8.8 没有该消息。请用 scene:restore-prefab 或 prefab 域工具。",
+    "scene:connect-prefab-instance": "3.8.8 没有该消息。请用 scene:restore-prefab。",
+    "scene:set-prefab": "3.8.8 没有该消息。请用 scene:restore-prefab。",
+    "scene:set-prefab-connection": "3.8.8 没有该消息。请用 scene:restore-prefab。",
+    "scene:load-prefab-to-node": "3.8.8 没有该消息。请用 asset-db:open-asset 打开 prefab。",
+    "scene:delete-component": "3.8.8 没有该消息。删除组件请用 scene:remove-component。",
+    "scene:undo.record": "3.8.8 没有该消息。请用 scene:snapshot / scene:snapshot-abort。",
+    "scene:new-scene": "3.8.8 没有该消息。请用 asset-db:create-asset 创建 .scene 后再 scene:open-scene。",
+    "scene:revert-prefab": "3.8.8 没有该消息。请用 scene:restore-prefab。",
+    "scene:change-view-mode-2d-3d": "3.8.8 没有该消息。请用 scene:change-is2D。",
+    "scene:query-view-mode-2d-3d": "3.8.8 没有该消息。请用 scene:query-is2D。",
+    "scene:reset-scene-view": "3.8.8 没有该消息。",
+    "console:query-last-logs": "3.8.8 没有该消息。",
+    "builder:query-build-options": "3.8.8 没有该消息。请用 builder:query-platform-config。",
+    "asset-db:open-asset-external": "3.8.8 没有该消息。",
+    "asset-db:write-asset": "3.8.8 没有该消息。请用 asset-db:save-asset。"
+  }
+}
