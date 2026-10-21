@@ -541,6 +541,33 @@ test('scene.close：引擎正常关闭时返回 closed:true', async () => {
     resetSceneHealth();
 });
 
+test('场景频道健康快照：给扩展面板用', async () => {
+    // 面板要能一眼看出「场景频道已中毒」——
+    // 因为中毒后所有场景工具都失败，而表现只是「超时」，
+    // 用户在面板上看一眼就该知道该重启，而不是以为 MCP 装错了。
+    const { sceneHealthSnapshot } = require('../extension/bridge/handlers');
+    resetSceneHealth();
+    const snap = sceneHealthSnapshot();
+    assert.ok(snap && typeof snap === 'object', '能拿到健康快照');
+    assert.strictEqual(snap.dead, false, '初始状态不是中毒');
+    assert.ok(snap.probe && typeof snap.probe === 'string', '快照里要带上探活用的消息名');
+
+    // 判死后快照要能反映出来
+    const ctx = makeCtx({
+        msg: async (channel, message, ...args) => {
+            if (channel === 'scene' && message === snap.probe) await new Promise(() => {});
+            return true;
+        },
+    });
+    const handlers = createHandlers(ctx);
+    await assert.rejects(() => handlers['scene.tree']({}), /场景频道/);
+    await new Promise((r) => setTimeout(r, 8200));
+    await assert.rejects(() => handlers['scene.tree']({}), /场景频道不可用/);
+    const snap2 = sceneHealthSnapshot();
+    assert.strictEqual(snap2.dead, true, '判死后快照要显示中毒');
+    resetSceneHealth();
+});
+
 // ──────────────────── 场景频道健康闸门 ────────────────────
 
 test('场景频道卡死时，场景操作**快速失败**而不是干等到超时', async () => {

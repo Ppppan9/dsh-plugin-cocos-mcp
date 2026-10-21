@@ -1470,6 +1470,25 @@ module.exports = {
         sceneHealth.lastProbeError = null;
         healthProbeInFlight = null;
     },
+    /**
+     * 场景频道健康快照（给扩展面板显示用）。
+     *
+     * ⚠️ 为什么值得单独暴露：场景频道中毒后，**所有场景工具都会失败**，
+     *    而表现只是「超时」。用户在面板上看到「场景频道：已中毒」，
+     *    才知道该点「重启 Bridge」/ 重启 Cocos，而不是以为 MCP 装错了。
+     */
+    sceneHealthSnapshot() {
+        return {
+            dead: sceneHealth.dead,
+            failures: sceneHealth.failures,
+            lastProbeAt: sceneHealth.lastProbeAt,
+            probe: SCENE_HEALTH_PROBE,
+            lastProbeError: sceneHealth.lastProbeError || null,
+            lastProbeAtText: sceneHealth.lastProbeAt
+                ? new Date(sceneHealth.lastProbeAt).toLocaleTimeString()
+                : null,
+        };
+    },
     slimNode,
     resolveNode,
     inferDump,

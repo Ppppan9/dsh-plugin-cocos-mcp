@@ -226,7 +226,13 @@
     "Label 的 color 分量范围是 0-255，不是 0-1。",
     "离线改了 .prefab 后编辑器不会自动感知，必须 asset.reimport，否则编辑器下次保存会用旧数据覆盖你的修改。",
     "嵌套 prefab 里的节点，节点名不在 _name 里，而是在 PrefabInstance 的 propertyOverrides 里；离线工具会自动处理。",
-    "scene:set-property 会触发 undo 记录，批量操作后建议 scene.snapshot + scene.snapshot.abort 做事务边界。",
-    "cc.Label 的 string 属性不是 _string（在 prefab 文件里是 _string，在编辑器 dump 里是 string）。"
+    "scene:set-property 会触发 undo 记录。⚠️ 但 scene.snapshot + scene.snapshot.abort **不会回滚任何修改**（3.8.8 实测：建了节点再 abort，节点还在）—— 它只是个边界标记，误以为它能当 undo 用会丢改动。",
+    "cc.Label 的 string 属性不是 _string（在 prefab 文件里是 _string，在编辑器 dump 里是 string）。",
+    "⚠️ 打开场景前必须先确认**导入完成**：用 asset.isImported（查本地库产物文件），别用 asset.info 的 imported 字段 —— 那个字段在资源刚创建时就立刻为真，是假信号。打开一个还没导入完的场景，会让**整个场景操作永久卡死**（不是这一次失败，是之后所有场景工具都挂）。",
+    "⚠️ 打开场景可能要 9~54 秒（引擎在资产库自动刷新时会等它）。这是引擎行为不是卡死，别中途放弃重试 —— 重试反而可能把场景频道搞死。",
+    "⚠️ 场景频道一旦中毒，表现是**所有场景工具都报「超时」**，但 bridge/ping 一切正常。遇到成片的场景操作超时要想到这一点：重启 Cocos Creator 才能恢复，重启 MCP 没用。扩展面板上会直接显示「场景频道：已中毒」。",
+    "⚠️ scene.close 在 3.8.8 的 general edit mode 下**关不掉**普通场景（引擎返回 false）。切换场景直接 scene.open 打开新的，不要指望先 close。",
+    "⚠️ 当前打开的场景**删不掉**：删了会让编辑器留下指向已删除资源的引用，之后打开任何场景都挂死。要删它，先 scene.open 打开另一个场景（它就不再是当前场景了），再回来删。",
+    "⚠️ scene:query-dirty 不反映内存态 —— 建了节点它也返回 false。别拿它判断「场景有没有改动」。"
   ]
 }

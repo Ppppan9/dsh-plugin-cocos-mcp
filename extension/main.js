@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const { createBridge } = require('./bridge/server');
-const { createHandlers, resetSceneHealth } = require('./bridge/handlers');
+const { createHandlers, resetSceneHealth, sceneHealthSnapshot } = require('./bridge/handlers');
 const { listChannels } = require('./bridge/messages');
 
 /**
@@ -341,6 +341,15 @@ exports.methods = {
         return { hub, found: !!hub, exists: hub ? fs.existsSync(hub) : false };
     },
     async getBridgeStatus() {
+        // ⚠️ 带上「场景频道健康」——
+        //    场景频道中毒后所有场景工具都会失败，而表现只是「超时」，
+        //    用户在面板上看一眼就知道该重启，而不是以为 MCP 装错了。
+        let sceneHealth = null;
+        try {
+            sceneHealth = sceneHealthSnapshot();
+        } catch (_) {
+            sceneHealth = null;
+        }
         return {
             ok: true,
             running: !!bridge,
@@ -349,6 +358,7 @@ exports.methods = {
             projectPath: Editor.Project.path,
             editorVersion: Editor.App.version,
             token: token ? `${token.slice(0, 6)}…${token.slice(-4)}` : null,
+            sceneHealth,
         };
     },
     async restartBridge() {

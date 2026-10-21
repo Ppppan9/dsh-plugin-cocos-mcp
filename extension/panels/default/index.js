@@ -28,6 +28,22 @@ module.exports = {
         <div class="row"><label>实例短名</label><code>{{ status.shortName }}</code></div>
         <div class="row"><label>编辑器版本</label><code>{{ status.editorVersion }}</code></div>
         <div class="row"><label>项目路径</label><code class="path">{{ status.projectPath }}</code></div>
+        <!-- ⚠️ 场景频道中毒后，**所有场景工具都会失败**，而表现只是「超时」。
+             在这里明说，用户一眼就知道该重启，而不是以为 MCP 装错了。 -->
+        <div class="row" v-if="status.sceneHealth">
+            <label>场景频道</label>
+            <code :style="status.sceneHealth.dead ? 'color:#e5534b' : 'color:#57ab5a'">
+                {{ status.sceneHealth.dead ? '已中毒（所有场景工具会失败）' : '正常' }}
+            </code>
+        </div>
+        <div class="row" v-if="status.sceneHealth && status.sceneHealth.dead">
+            <label></label>
+            <button @click="restart">重启 Bridge</button>
+        </div>
+        <div class="row" v-if="status.sceneHealth && status.sceneHealth.lastProbeError && !status.sceneHealth.dead">
+            <label>最近探活</label>
+            <code class="path">{{ status.sceneHealth.lastProbeError }}</code>
+        </div>
     </div>
     <div class="block" v-if="!status || !status.running">
         <p class="hint">Bridge 未运行。尝试重启扩展，或检查控制台报错。</p>
