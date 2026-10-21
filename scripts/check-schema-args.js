@@ -1,0 +1,68 @@
+'use strict';
+
+/**
+ * 精确提取 bridge 里每个 op 的源码。
+ *
+ * ⚠️ 不要用「正则找 `'name': async (args) => {` 再配对大括号」——
+ *    op 体里有字符串/模板字面量里的花括号，配对会错位，
+ *    结果会把**相邻 op** 的参数算进来（真实踩过：scene.node 报出了
+ *    maxDepth/name/type —— 那是 scene.find 的参数，结论完全错）。
+ *
+ * 所有 op 都在同一个对象字面量里、缩进一致（8 空格），
+ * 所以「一个顶层键到下一个顶层键」就是准确的边界。
+ */
+const fs = require('fs');
+const path = require('path');
+
+const ROOT = path.join(__dirname, '..');
+const HANDLERS = path.join(ROOT, 'extension', 'bridge', 'handlers.js');
+
+function extractOpBodies(src) {
+    const ops = new Map();
+    // 顶层 op 的键：行首 8 空格 + 引号 + 名字 + 引号 + 冒号
+    const re = /^ {8}'([a-z][a-zA-Z0-9_.]*)':/gm;
+    const marks = [];
+    let m;
+    while ((m = re.exec(src)) !== null) marks.push({ name: m[1], start: m.index });
+    for (let i = 0; i < marks.length; i++) {
+        const end = i + 1 < marks.length ? marks[i + 1].start : src.length;
+        ops.set(marks[i].name, src.slice(marks[i].start, end));
+    }
+    return ops;
+}
+
+/** 某个 op 真正读到的参数名。 */
+function argsUsed(body) {
+    const used = new Set();
+    // 只取**该 op 自己的** args.X（排除 op.args / foo.args 这类嵌套的）
+    const re = /(?<![\w.$])args\.([A-Za-z_][A-Za-z0-9_]*)/g;
+    let m;
+    while ((m = re.exec(body)) !== null) used.add(m[1]);
+    return [...used].sort();
+}
+
+module.exports = { extractOpBodies, argsUsed, HANDLERS, ROOT };
+
+if (require.main === module) {
+    const src = fs.readFileSync(HANDLERS, 'utf8');
+    const ops = extractOpBodies(src);
+    const { EDITOR_TOOLS } = require(path.join(ROOT, 'hub', 'src', 'tools', 'editor-tools.js'));
+    console.log(`解析到 ${ops.size} 个 bridge op\n`);
+    let bad = 0;
+    for (const t of EDITOR_TOOLS) {
+        if (!t.op) continue;
+        const body = ops.get(t.op);
+        if (!body) {
+            console.log(`  ? ${t.name} → op "${t.op}" 在 handlers.js 里找不到`);
+            continue;
+        }
+        const declared = new Set(Object.keys((t.inputSchema || {}).properties || {}));
+        const missing = argsUsed(body).filter((k) => !declared.has(k));
+        if (missing.length) {
+            bad++;
+            console.log(`  ✘ ${t.name} (op ${t.op}) → bridge 读了但 schema 没声明：${missing.join(', ')}`);
+        }
+    }
+    console.log(bad ? `\n共 ${bad} 个工具有缺口` : '\n✅ 全部一致');
+    process.exit(bad ? 1 : 0);
+}

@@ -98,6 +98,12 @@ function validate(entry, now = Date.now(), staleMs = STALE_MS) {
             else reasons.push(`心跳超时（${Math.round((now - ts) / 1000)}s）`);
         }
     }
+    // ⚠️ **stale 只在「除心跳外没有其它问题」时才成立** ——
+    //    否则一条「url 不是 loopback / token 太短」的坏记录，
+    //    只要心跳旧就会被标成 stale 而**被保留**，
+    //    于是 hub 会带着 Bearer token 把请求发到**非 loopback 地址**（SSRF + 凭据泄露）。
+    //    这是本轮引入的真实安全回归，判据必须严格。
+    if (stale && reasons.length) stale = false;
     return { ok: reasons.length === 0, reasons, stale };
 }
 

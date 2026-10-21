@@ -70,6 +70,26 @@ test('validate：url 非 loopback / token 太短 → 无效', () => {
     assert.strictEqual(validate(entry({ url: '' }), Date.now(), STALE_MS).ok, false);
 });
 
+test('validate：stale 只在「除心跳外没有其它问题」时才成立（安全）', () => {
+    // ⚠️ 这是本轮引入的真实**安全回归**：
+    //    曾经写成 `if (v.ok || v.stale)` —— 一条「url 不是 loopback / token 太短」
+    //    的坏记录，只要心跳旧就会被标成 stale 而**保留**，
+    //    于是 hub 会带着 Bearer token 把请求发到**非 loopback 地址**（SSRF + 凭据泄露）。
+    //    判据必须严格：stale 只表示「只是没心跳」。
+    const old = Date.now() - STALE_MS - 5000;
+
+    const badUrl = validate(entry({ ts: old, url: 'http://evil.example.com/x' }), Date.now(), STALE_MS);
+    assert.strictEqual(badUrl.stale, false, 'url 非 loopback 时不能标 stale（会被保留并被发请求）');
+    assert.strictEqual(badUrl.ok, false, 'url 非 loopback 必须判无效');
+
+    const badToken = validate(entry({ ts: old, token: 'short' }), Date.now(), STALE_MS);
+    assert.strictEqual(badToken.stale, false, 'token 太短时不能标 stale');
+
+    // 对照：只有心跳旧、其它都没问题 → 才算 stale
+    const good = validate(entry({ ts: old }), Date.now(), STALE_MS);
+    assert.strictEqual(good.stale, true, '只有心跳超时时才标 stale');
+});
+
 test('dedupeShortNames：同项目多份注册 → 一个当代表，其余改名 -dup<pid>', () => {
     // 真实场景：编辑器 spawn 竞态双开 → 同一个项目注册了两份。
     // 设计不是「丢掉一个」（那样就有一个实例调不到了），而是

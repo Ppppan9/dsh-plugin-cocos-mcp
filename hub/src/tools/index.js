@@ -73,12 +73,21 @@ function validateArgs(tool, args) {
 
     for (const key of Object.keys(args)) {
         const value = args[key];
-        if (value === undefined || value === null) continue;
         const spec = props[key];
         if (!spec) {
             errors.push(
                 `未知参数 "${key}"（可用参数：${Object.keys(props).join('、') || '无'}）`
             );
+            continue;
+        }
+        // ⚠️ null **不是**「没传」——
+        //    它会一路传到 handler 里变成 0 / NaN / 空串，
+        //    让「等待 90 秒」变成「一次都不等」（实测：waitMs: null → 0 次轮询，
+        //    立刻返回「未导入完成」——和 waitMs:"abc" 是同一类静默错误）。
+        //    所以 null 也要按类型校验，不能悄悄跳过。
+        if (value === undefined) continue;
+        if (value === null) {
+            errors.push(`参数 "${key}" 不能是 null（要清掉它就别传这个参数）`);
             continue;
         }
         const t = spec.type;
@@ -153,11 +162,18 @@ class ToolRegistry {
      */
     _rebuild(force = false) {
         const editors = this.listEditors() || [];
-        // ⚠️ 签名必须包含 url 与 token：
-        // 扩展的「重启 Bridge」会**重新生成 token 并换端口**，但 pid 与 shortName 不变。
-        // 签名里少了 url/token 的话，_rebuild 会认为「没变化」而保留旧 entry，
-        // 于是之后每次调用都打已经关掉的旧端口 —— hub 永久失联，只能重启 Cocos。
-        const sig = editors.map((e) => `${e.pid}:${e.shortName}:${e.url}:${e.token}`).join('|') + '#' + this.filter;
+        // ⚠️ 签名必须包含 url、token **和 stale**：
+        //   - url/token：扩展的「重启 Bridge」会**重新生成 token 并换端口**，
+        //     但 pid 与 shortName 不变。签名里少了它们，_rebuild 会认为「没变化」
+        //     而保留旧 entry，之后每次调用都打已经关掉的旧端口 —— hub 永久失联。
+        //   - stale：编辑器会从「健康」变成「正忙」（心跳停）。
+        //     签名里少了它，entry 就一直是当初那个**没有 stale 标记**的对象 →
+        //     「编辑器正忙就立刻失败」这道闸门**永远不会触发**，
+        //     反而变成「干等 60 秒的错误答案」。（真实踩到。）
+        const sig =
+            editors.map((e) => `${e.pid}:${e.shortName}:${e.url}:${e.token}:${e.stale ? 1 : 0}`).join('|') +
+            '#' +
+            this.filter;
         if (!force && sig === this._sig && this._byName.size) {
             return this._cache;
         }

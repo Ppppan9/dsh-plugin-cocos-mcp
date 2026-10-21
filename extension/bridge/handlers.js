@@ -857,7 +857,18 @@ function createHandlers(ctx) {
             // ⚠️ query-classes 的参数是 QueryClassesOptions {extends, excludeSelf}，
             // **不是** {name}。传 {} 会返回空数组（实测）。
             // 语义是「列出继承自某基类的所有类」，默认列全部组件类。
-            const options = args.options && typeof args.options === 'object' ? args.options : {};
+            //
+            // ⚠️ **两种形态都要收**：
+            //    嵌套 `options: {extends, excludeSelf}`（与 Cocos 消息同形），
+            //    以及扁平 `extends / excludeSelf`（工具层与调用方的直觉）。
+            //    之前只认嵌套的，而工具层传的是扁平的 → **extends 过滤器从来没生效过**，
+            //    传什么都在列全部组件类（看起来能用，其实参数被静默丢了）。
+            const nested = args.options && typeof args.options === 'object' ? args.options : {};
+            const options = {
+                extends: nested.extends !== undefined ? nested.extends : args.extends,
+                excludeSelf:
+                    nested.excludeSelf !== undefined ? nested.excludeSelf : args.excludeSelf,
+            };
             if (!options.extends) options.extends = 'cc.Component';
             if (options.excludeSelf === undefined) options.excludeSelf = true;
             const list = await send('scene', 'query-classes', [options]);

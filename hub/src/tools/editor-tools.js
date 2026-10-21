@@ -70,7 +70,10 @@ const EDITOR_TOOLS = [
         description: '读取单个节点的完整 dump（含每个组件的全部属性）。node 可传 uuid、层级路径（Canvas/Button）或节点名。',
         inputSchema: {
             type: 'object',
-            properties: { node: { type: 'string', description: 'uuid / 层级路径 / 节点名' } },
+            properties: {
+                node: { type: 'string', description: 'uuid / 层级路径 / 节点名' },
+                raw: { type: 'boolean', description: '额外返回未解包的原始 dump（排查用，体积大）' },
+            },
             required: ['node'],
         },
         op: 'scene.node',
@@ -129,7 +132,12 @@ const EDITOR_TOOLS = [
             //    （query-node-tree 永远不返回，所有场景工具全挂）。
             //    判据用 bridge 的 asset.isImported（查本地库文件是否存在）——
             //    asset-info / imported 字段都会**提前**变真，不能用。
-            const deadline = Date.now() + (args.waitMs === undefined ? 90000 : Number(args.waitMs));
+            // ⚠️ waitMs 要**自己**也兜住：即使校验层放过了脏值
+            //    （比如从别的调用路径进来的），也不能让等待循环一次都不跑。
+            const waitRaw = Number(args.waitMs);
+            const waitMs =
+                args.waitMs === undefined || !Number.isFinite(waitRaw) || waitRaw <= 0 ? 90000 : waitRaw;
+            const deadline = Date.now() + waitMs;
             let ready = false;
             let lastReason = null;
             while (Date.now() < deadline) {
@@ -209,6 +217,16 @@ const EDITOR_TOOLS = [
             type: 'object',
             properties: {
                 extends: { type: 'string', description: '基类名，默认 cc.Component' },
+                options: {
+                    type: 'object',
+                    description:
+                        'Cocos 原生的 QueryClassesOptions 形态（{extends, excludeSelf}）。' +
+                        '与扁平的 extends/excludeSelf 等价，二选一。',
+                    properties: {
+                        extends: { type: 'string' },
+                        excludeSelf: { type: 'boolean' },
+                    },
+                },
                 excludeSelf: { type: 'boolean', description: '是否排除基类自身，默认 true' },
             },
         },
@@ -342,6 +360,21 @@ const EDITOR_TOOLS = [
             properties: {
                 parent: { type: 'string', description: '父节点 uuid / 路径 / 名字' },
                 name: { type: 'string' },
+                type: { type: 'string', description: '节点类型，如 cc.Node / cc.EmptyNode' },
+                position: {
+                    type: 'object',
+                    description: '初始位置 {x, y, z}',
+                    properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
+                },
+                components: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: '要挂的组件类型，如 ["cc.UITransform"]',
+                },
+                canvasRequired: {
+                    type: 'boolean',
+                    description: '要求父节点是 Canvas（UI 节点必须）',
+                },
                 type: { type: 'string', description: '可选：资源类型（如 cc.Sprite）' },
                 position: {
                     type: 'object',
@@ -532,6 +565,11 @@ const EDITOR_TOOLS = [
             type: 'object',
             properties: {
                 pattern: { type: 'string', description: '如 db://assets/**/*.prefab' },
+                dataKeys: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: '额外要返回的字段（asset-db 的 dataKeys）',
+                },
                 ccType: { type: 'string', description: '如 cc.Prefab' },
             },
         },
@@ -540,7 +578,18 @@ const EDITOR_TOOLS = [
     T('asset.info', {
         title: '资源详情',
         description: '查单个资源的元信息（uuid、类型、路径、大小、子资源列表）。url 可传 db://assets/xxx 或 uuid。',
-        inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+        inputSchema: {
+            type: 'object',
+            properties: {
+                url: { type: 'string' },
+                dataKeys: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: '额外要返回的字段（asset-db 的 dataKeys）',
+                },
+            },
+            required: ['url'],
+        },
         op: 'asset.info',
     }),
     T('asset.isImported', {
@@ -670,7 +719,14 @@ const EDITOR_TOOLS = [
     T('asset.dependencies', {
         title: '资源依赖',
         description: '查一个资源依赖了哪些资源（贴图、预制体、脚本）。',
-        inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+        inputSchema: {
+            type: 'object',
+            properties: {
+                url: { type: 'string' },
+                type: { type: 'string', enum: ['asset', 'script', 'all'], description: '依赖类型' },
+            },
+            required: ['url'],
+        },
         op: 'asset.dependencies',
     }),
 

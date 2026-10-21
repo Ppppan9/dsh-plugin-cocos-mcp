@@ -368,6 +368,37 @@ test('每个 handler 读取的参数都已在 schema 里声明（否则参数校
     }
 });
 
+test('工具 schema 必须覆盖 Bridge 侧真正支持的参数', () => {
+    // ⚠️ 工具是把 args **原样透传**给 Bridge op 的 ——
+    //    所以 Bridge 读的每一个参数，都应该在 schema 里声明，
+    //    否则用户传了它会被参数校验当成「未知参数」硬拒（-32602）。
+    //
+    //    真踩过 6 处：scene.node(raw) / node.create(components, position, type,
+    //    canvasRequired) / asset.query(dataKeys) / asset.info(dataKeys) /
+    //    asset.dependencies(type) / scene.classes(options)。
+    //
+    //    比对逻辑放在 scripts/check-schema-args.js（可单独跑），
+    //    那里用「顶层键切分」精确取每个 op 的源码 —— 用正则配对大括号会错位，
+    //    把相邻 op 的参数算进来。
+    const { extractOpBodies, argsUsed } = require('../scripts/check-schema-args');
+    const ops = extractOpBodies(read('extension/bridge/handlers.js'));
+    const problems = [];
+    for (const t of EDITOR_TOOLS) {
+        if (!t.op) continue;
+        const body = ops.get(t.op);
+        if (!body) {
+            problems.push(`${t.name} → op "${t.op}" 在 handlers.js 里找不到`);
+            continue;
+        }
+        const declared = new Set(Object.keys((t.inputSchema || {}).properties || {}));
+        const missing = argsUsed(body).filter((k) => !declared.has(k));
+        if (missing.length) {
+            problems.push(`${t.name} (op ${t.op}) → ${missing.join('、')}`);
+        }
+    }
+    assert.deepStrictEqual(problems, [], '这些参数 Bridge 支持但 schema 没声明：\n  - ' + problems.join('\n  - '));
+});
+
 test('README 的工具清单与实际工具一致', () => {
     const all = [...EDITOR_TOOLS, ...GLOBAL_TOOLS];
     // README 里写的工具数量

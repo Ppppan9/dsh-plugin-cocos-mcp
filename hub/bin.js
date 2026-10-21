@@ -90,18 +90,22 @@ async function main() {
         for (const e of editors) {
             const client = getClient(e);
             const rec = { shortName: e.shortName, projectPath: e.projectPath, editorVersion: e.editorVersion, url: e.url };
+            // ⚠️ stale 要**在 ping 之前**就记上 ——
+            //    「编辑器正忙」的表现恰恰是 ping 失败，
+            //    如果只在 ping 成功之后才检查 stale，真·正忙的时候反而不会报 stale。
+            if (e.stale) {
+                rec.stale = true;
+                rec.staleNote = '心跳超时（编辑器可能正忙）';
+            }
             try {
                 rec.ping = await client.ping();
                 rec.ops = (await client.describe()).ops.length;
                 rec.ok = true;
-                // ⚠️ 心跳超时但进程还在 → 编辑器正忙，不是「没装扩展」。
-                //    probe 要把这个区别说出来，否则排查会往错的方向走。
-                if (e.stale) {
-                    rec.stale = true;
-                    rec.staleNote = '心跳超时（编辑器可能正忙）';
-                }
             } catch (err) {
                 rec.error = err.message;
+                if (rec.stale) {
+                    rec.staleNote = '心跳超时且无响应（编辑器正忙或场景频道已中毒）';
+                }
             }
             out.editors.push(rec);
         }
