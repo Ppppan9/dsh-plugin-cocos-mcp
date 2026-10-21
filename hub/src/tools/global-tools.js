@@ -106,6 +106,38 @@ function requireOffline() {
     return m;
 }
 
+/**
+ * 把离线模块的 `{ok:false, error}` 结果**转成真正的错误**。
+ *
+ * ⚠️ 事务型操作失败时必须让 MCP 层把 isError 置为 true ——
+ *    之前离线编辑失败也返回「工具调用成功」，只是数据里带着 ok:false。
+ *    模型/脚本如果只看 isError 就会以为改成功了 —— 这正是本项目
+ *    反复强调的「假成功比报错更危险」。
+ */
+function assertOfflineOk(result, toolName) {
+    if (result && result.ok === false) {
+        throw new Error(`${toolName} 失败：${result.error || '未知原因'}`);
+    }
+    return result;
+}
+
+/**
+ * 把离线模块的 `{ok, data}` 结果**拍平**成业务数据。
+ *
+ * ⚠️ 之前离线工具直接把 `{ok:true, data:{...}}` 交给模型，于是：
+ *   cocos_prefab_query → {ok:true, data:{count, nodes}}   ← 要再取一层 .data
+ *   scene.tree         → {count, nodes}                   ← 直接就是数据
+ * 同一套工具面里两种形状，模型很容易取错字段。
+ * 失败时抛错（见 assertOfflineOk），成功时直接返回业务数据 —— 与编辑器侧工具一致。
+ */
+function unwrapOffline(result, toolName) {
+    assertOfflineOk(result, toolName);
+    if (result && typeof result === 'object' && Object.prototype.hasOwnProperty.call(result, 'data')) {
+        return result.data;
+    }
+    return result;
+}
+
 // ─────────────────────────────────────────────────────────────
 // 工具定义
 // ─────────────────────────────────────────────────────────────
@@ -189,12 +221,15 @@ const GLOBAL_TOOLS = [
         handler: async (args, ctx) => {
             const offline = requireOffline();
             const filePath = assertInsideProject(ctx, args.filePath, 'prefab 路径');
-            return offline.queryPrefab({
-                filePath,
-                selector: args.selector,
-                target: args.target,
-                maxDepth: args.maxDepth,
-            });
+            return unwrapOffline(
+                offline.queryPrefab({
+                    filePath,
+                    selector: args.selector,
+                    target: args.target,
+                    maxDepth: args.maxDepth,
+                }),
+                'cocos_prefab_query'
+            );
         },
     }),
 
@@ -219,12 +254,15 @@ const GLOBAL_TOOLS = [
             const offline = requireOffline();
             const filePath = assertInsideProject(ctx, args.filePath, 'prefab 路径');
             assertOpPathsInsideProject(ctx, args.ops, 'op 内路径');
-            return offline.editPrefab({
-                filePath,
-                ops: args.ops,
-                dryRun: !!args.dryRun,
-                allowedRoots: projectRoots(ctx),
-            });
+            return unwrapOffline(
+                offline.editPrefab({
+                    filePath,
+                    ops: args.ops,
+                    dryRun: !!args.dryRun,
+                    allowedRoots: projectRoots(ctx),
+                }),
+                'cocos_prefab_edit'
+            );
         },
         safety: 'write',
     }),
@@ -256,7 +294,7 @@ const GLOBAL_TOOLS = [
             if (res && res.ok && res.data && Array.isArray(res.data.ops)) {
                 assertOpPathsInsideProject(ctx, res.data.ops, 'op 内路径');
             }
-            return res;
+            return unwrapOffline(res, 'cocos_prefab_batch');
         },
         safety: 'write',
     }),
@@ -331,7 +369,10 @@ const GLOBAL_TOOLS = [
         handler: async (args, ctx) => {
             const offline = requireOffline();
             const filePath = assertInsideProject(ctx, args.filePath, 'anim 路径');
-            return offline.queryAnimation({ filePath, selector: args.selector, target: args.target });
+            return unwrapOffline(
+                offline.queryAnimation({ filePath, selector: args.selector, target: args.target }),
+                'cocos_anim_query'
+            );
         },
     }),
 
@@ -352,7 +393,10 @@ const GLOBAL_TOOLS = [
         handler: async (args, ctx) => {
             const offline = requireOffline();
             const filePath = assertInsideProject(ctx, args.filePath, 'anim 路径');
-            return offline.editAnimation({ filePath, ops: args.ops, dryRun: !!args.dryRun });
+            return unwrapOffline(
+                offline.editAnimation({ filePath, ops: args.ops, dryRun: !!args.dryRun }),
+                'cocos_anim_batch'
+            );
         },
         safety: 'write',
     }),

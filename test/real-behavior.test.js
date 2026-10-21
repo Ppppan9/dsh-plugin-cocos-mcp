@@ -33,8 +33,22 @@ function bad(name, detail) {
     console.log(`  ❌ ${name} — ${detail}`);
 }
 function note(text) {
-    notes.push(text);
+    notes.push(String(text));
     console.log(`  ℹ️  ${text}`);
+}
+/**
+ * 安全地 JSON 化一个可能为 undefined 的值。
+ * ⚠️ JSON.stringify(undefined) 返回 undefined（不是字符串），
+ *    再调 .slice(0,120) 会抛 TypeError —— 而这会被外层 catch 吞成
+ *    「执行中断」，导致**后半程的整段测试都没跑**，报告数字严重低估失败面。
+ */
+function safeJson(v, max = 120) {
+    try {
+        const s = JSON.stringify(v === undefined ? null : v);
+        return String(s).slice(0, max);
+    } catch (_) {
+        return '(无法序列化)';
+    }
 }
 function assert(cond, name, detail) {
     if (cond) ok(name, detail);
@@ -79,12 +93,52 @@ class McpClient {
         this.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params: params || {} }) + '\n');
     }
     async call(name, args) {
-        const res = await this.request('tools/call', { name, arguments: args || {} });
+        const res = await this.request('tools/call', { name: this.resolveToolName(name), arguments: args || {} });
         if (res.error) return { isError: true, text: res.error.message, protocolError: true };
         const text = (res.result.content || []).map((c) => c.text).join('\n');
         let data;
         try { data = JSON.parse(text); } catch (_) { data = text; }
         return { isError: !!res.result.isError, data, text };
+    }
+
+    /**
+     * 解析真实的工具名。
+     *
+     * ⚠️ hub 在**多编辑器**模式下会给所有编辑器工具加 `<短名>__` 前缀。
+     *    而这些真机脚本写死的是无前缀名 —— 一旦同时有第二个编辑器实例
+     *    （比如 e2e 测试自己会注册一个 fake-editor 并保持十几秒），
+     *    所有调用都会变成「未知工具 xxx」，报告全篇失真。
+     *
+     * 所以：先 tools/list 拿到真实工具清单，按需解析。
+     *    解析不到就**明确报错**，而不是让调用方拿到一句「未知工具」。
+     */
+    async loadTools() {
+        const res = await this.request('tools/list', {});
+        const list = (res.result && res.result.tools) || [];
+        this.toolNames = new Set(list.map((t) => t.name));
+        this.prefixed = new Map(); // 基础名 → [带前缀的真实名]
+        for (const n of this.toolNames) {
+            const i = n.indexOf('__');
+            if (i > 0) {
+                const base = n.slice(i + 2);
+                if (!this.prefixed.has(base)) this.prefixed.set(base, []);
+                this.prefixed.get(base).push(n);
+            }
+        }
+        return this.toolNames;
+    }
+    resolveToolName(name) {
+        if (!this.toolNames) return name;
+        if (this.toolNames.has(name)) return name;
+        const cand = this.prefixed.get(name);
+        if (cand && cand.length === 1) return cand[0];
+        if (cand && cand.length > 1) {
+            throw new Error(
+                `工具 "${name}" 在当前有多个编辑器实例，必须先指定一个：` +
+                `设置环境变量 COCOS_MCP_EDITOR_FILTER=<短名> 后重跑。候选：${cand.join('、')}`
+            );
+        }
+        return name;
     }
     close() { try { this.proc.kill(); } catch (_) {} }
 }
@@ -107,6 +161,16 @@ async function main() {
     const c = new McpClient();
     await c.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'real', version: '1' } });
     c.notify('notifications/initialized');
+    // ⚠️ 先取真实工具清单 —— 多编辑器时 hub 会给工具名加 <短名>__ 前缀，
+    //    写死的无前缀名会全部变成「未知工具」。
+    await c.loadTools();
+    if (c.prefixed.size && !c.toolNames.has('scene.tree')) {
+        console.error(
+            `检测到多个编辑器实例（${c.prefixed.size} 个带前缀的工具族），` +
+            '请用环境变量 COCOS_MCP_EDITOR_FILTER=<短名> 指定一个后重跑。'
+        );
+        process.exit(2);
+    }
 
     const marker = 'RB' + Date.now().toString(36);
 
@@ -139,8 +203,8 @@ async function main() {
             const pasted = afterPaste.data && afterPaste.data.nodes.filter((n) => n.name === marker);
             assert(pasted.length === 1, '★ paste 后同名节点恰好 1 个', `实际 ${pasted.length} 个`);
             assert(pasted.length && pasted[0].uuid !== uuid, '★ paste 产生的是新节点（uuid 不同）');
-            note(`cut 的返回：${JSON.stringify(cut.data).slice(0, 140)}`);
-            note(`paste 的返回：${JSON.stringify(paste.data).slice(0, 140)}`);
+            note(`cut 的返回：${safeJson(cut.data, 140)}`);
+            note(`paste 的返回：${safeJson(paste.data, 140)}`);
 
             // 清理（节点可能已被 cut 掉）
             const t3 = await c.call('scene.tree');
@@ -174,15 +238,21 @@ async function main() {
             const after2 = await c.call('component.list', { node: compUuid });
             const types2 = after2.data && after2.data.components ? after2.data.components.map((x) => x.type) : [];
             assert(!types2.includes('cc.Button'), '★ cc.Button 真的被摘掉了（不是假成功）', types2.join(','));
+            // ⚠️ 必须清理 —— 否则每跑一轮就在场景里留一个孤儿节点，
+            //    跑几次之后场景被测试垃圾塞满，后续断言的节点示例都会被干扰。
+            await c.call('node.delete', { node: compUuid, confirm: true });
         }
 
         // ── 3. 资源 url 必须是 db://assets/ 前缀 ──────────────────
         console.log('\n▸ 3. 资源 url 白名单（防写到项目外）');
-        for (const bad of ['/tmp/evil.json', 'db://../../evil.json', 'file:///tmp/evil.json']) {
+        // ⚠️ 用临时目录里的专属文件名，别用固定的 /tmp/evil.json ——
+        //    别的进程或上一轮残留会造成假失败。
+        const evilFile = path.join(os.tmpdir(), `__cocos_mcp_evil_${Date.now()}.json`);
+        for (const bad of [evilFile, 'db://../../evil.json', 'file:///tmp/evil.json']) {
             const r = await c.call('asset.save', { url: bad, content: '{}' });
             assert(r.isError, `拒绝写入 ${bad}`, String(r.text).slice(0, 90));
         }
-        assert(!fs.existsSync('/tmp/evil.json'), '★ 项目外确实没有产生文件');
+        assert(!fs.existsSync(evilFile), '★ 项目外确实没有产生文件');
 
         // ── 4. preferences 真的落盘吗 ───────────────────────────
         console.log('\n▸ 4. preferences 读写');
@@ -192,7 +262,7 @@ async function main() {
         assert(!ps.isError, 'preferences.set 成功', ps.isError ? ps.text : '');
         const pg2 = await c.call('preferences.get', { name: 'preview', key: '__cocos_mcp_probe__' });
         assert(!pg2.isError, 'preferences.get 回读', pg2.isError ? pg2.text : '');
-        note(`回读值：${JSON.stringify(pg2.data).slice(0, 120)}`);
+        note(`回读值：${safeJson(pg2.data, 120)}`);
 
         // ── 5. reference.set 真的改到参考图了吗 ──────────────────
         console.log('\n▸ 5. reference.set');
@@ -204,7 +274,7 @@ async function main() {
         assert(!rs.isError, 'reference.set 成功', rs.isError ? rs.text : '');
         const rc = await c.call('reference.current');
         assert(!rc.isError, 'reference.current 读回', rc.isError ? rc.text : '');
-        note(`当前参考图：${JSON.stringify(rc.data).slice(0, 160)}`);
+        note(`当前参考图：${safeJson(rc.data, 160)}`);
         await c.call('reference.remove', { paths: [refImg] });
 
         // ── 6. view.align / view.focus 真的作用到编辑器吗 ────────
@@ -260,10 +330,25 @@ async function main() {
         const assets = await c.call('asset.query', { pattern: 'db://assets/**/*.prefab' });
         const list = assets.data && assets.data.assets ? assets.data.assets : [];
         if (list.length) {
-            const p = list[0].path || list[0].url;
-            const q = await c.call('cocos_prefab_query', { filePath: p, selector: 'tree' });
-            assert(!q.isError, '能离线读工程内的 prefab', q.isError ? q.text : '');
-            note(`prefab 节点数：${q.data ? q.data.count : '?'}`);
+            // ⚠️ asset.query 返回的 `path` 是 **db:// URL**，不是文件系统路径 ——
+            //    直接拿它当 filePath 会被拼成 "<项目>/db:/assets/xxx" 然后被护栏拒掉。
+            //    真实文件系统路径要用 asset.path 工具查。
+            const pRes = await c.call('asset.path', { url: list[0].url });
+            // asset.path 直接返回路径**字符串**（不是 {path:...}）
+            const p = typeof pRes.data === 'string' ? pRes.data : null;
+            if (!p) {
+                note(`拿不到 prefab 的文件系统路径（asset.path 返回：${safeJson(pRes.data, 80)}）`);
+            } else {
+                const q = await c.call('cocos_prefab_query', { filePath: p, selector: 'tree' });
+                assert(!q.isError, '能离线读工程内的 prefab', q.isError ? q.text : '');
+                // ⚠️ 离线工具的结果已**拍平** —— 与 scene.tree 同形状（不再多包一层 data）
+                assert(
+                    q.data && typeof q.data.count === 'number' && Array.isArray(q.data.nodes),
+                    '★ 离线查询的结果与编辑器侧工具同形状（直接是 {count, nodes}）',
+                    safeJson(q.data, 120)
+                );
+                note(`prefab 节点数：${q.data ? q.data.count : '?'}`);
+            }
         } else {
             note('工程里没有 .prefab，跳过');
         }
@@ -288,7 +373,7 @@ async function main() {
                     assert(
                         st.data && st.data.imported === false,
                         '库产物缺失时 asset.isImported 判为未导入',
-                        JSON.stringify(st.data || st.text).slice(0, 120)
+                        safeJson(st.data || st.text, 120)
                     );
                     assert(
                         st.data && st.data.reason && st.data.reason.length > 4,
@@ -313,6 +398,87 @@ async function main() {
                     );
                 } finally {
                     fs.renameSync(bak, libFile);
+                }
+            }
+        }
+
+        // ── 13. 离线 prefab 编辑器的**写盘路径**（真实文件上跑）──
+        // ⚠️ 之前只测过「读」，写盘路径在真机上从没跑过 ——
+        //    而写盘恰恰是最容易出事的地方（原子写、.meta 事务、失败零写入）。
+        console.log('\n▸ 13. 离线 prefab 写盘路径（真实文件）');
+        {
+            const prefabPath = path.join(ed.projectPath, 'assets', 'smoke-sample.prefab');
+            if (!fs.existsSync(prefabPath)) {
+                note('工程里没有 smoke-sample.prefab，跳过离线写盘验证');
+            } else {
+                const before = fs.readFileSync(prefabPath, 'utf8');
+
+                // ⚠️ 节点名必须**先查出来**再用 ——
+                //    写死一个名字（比如 "default"）会「操作失败但工具报成功」，
+                //    因为离线编辑把 op 执行失败也包在 {ok:true} 里。
+                //    而且 Cocos 会把 prefab 的根节点名改成与文件名一致。
+                const tree0 = await c.call('cocos_prefab_query', { filePath: prefabPath, selector: 'tree' });
+                const nodes0 = (tree0.data && tree0.data.nodes) || [];
+                const root0 = nodes0[0] && (nodes0[0].name || nodes0[0].path);
+                if (!root0) {
+                    note('读不到 prefab 根节点名，跳过离线写盘验证');
+                } else {
+                    const NEW_NAME = 'RENAMED_BY_MCP';
+
+                    // 1) dryRun：只校验不落盘
+                    const dry = await c.call('cocos_prefab_edit', {
+                        filePath: prefabPath,
+                        ops: [{ op: 'rename-node', node: root0, name: NEW_NAME }],
+                        dryRun: true,
+                    });
+                    assert(!dry.isError, 'dryRun 校验通过', dry.isError ? dry.text : '');
+                    assert(
+                        fs.readFileSync(prefabPath, 'utf8') === before,
+                        '★ dryRun 之后磁盘内容**一字未改**'
+                    );
+
+                    // 2) 真正落盘
+                    const edit = await c.call('cocos_prefab_edit', {
+                        filePath: prefabPath,
+                        ops: [{ op: 'rename-node', node: root0, name: NEW_NAME }],
+                    });
+                    assert(!edit.isError, '离线编辑落盘成功', edit.isError ? edit.text : '');
+                    const after = fs.readFileSync(prefabPath, 'utf8');
+                    assert(after !== before, '★ 磁盘内容确实变了');
+                    assert(
+                        after.includes(NEW_NAME),
+                        '★ 改后的名字真的写进了文件',
+                        after.slice(0, 80)
+                    );
+
+                    // 3) 回读（走 query 工具，不是直接读文件）
+                    const q = await c.call('cocos_prefab_query', { filePath: prefabPath, selector: 'tree' });
+                    assert(!q.isError, '改完能离线回读', q.isError ? q.text : '');
+                    const names = q.data && q.data.nodes ? q.data.nodes.map((n) => n.name) : [];
+                    assert(
+                        names.includes(NEW_NAME),
+                        '★ 回读到的名字是改后的',
+                        names.slice(0, 5).join(',')
+                    );
+
+                    // 4) 失败的操作必须**零写入**，而且必须**报成错误**
+                    //    （不能「工具成功 + 数据里 ok:false」—— 那是假成功）
+                    const before2 = fs.readFileSync(prefabPath, 'utf8');
+                    const badEdit = await c.call('cocos_prefab_edit', {
+                        filePath: prefabPath,
+                        ops: [
+                            { op: 'rename-node', node: NEW_NAME, name: 'SHOULD_NOT_PERSIST' },
+                            { op: 'rename-node', node: '__不存在的节点__', name: 'X' },
+                        ],
+                    });
+                    assert(badEdit.isError, '含无效 op 的批量编辑必须报成错误（不能是假成功）', String(badEdit.text).slice(0, 110));
+                    assert(
+                        fs.readFileSync(prefabPath, 'utf8') === before2,
+                        '★ 失败的事务对磁盘零写入（第一条 op 也没留下）'
+                    );
+
+                    // 5) 还原
+                    fs.writeFileSync(prefabPath, before);
                 }
             }
         }

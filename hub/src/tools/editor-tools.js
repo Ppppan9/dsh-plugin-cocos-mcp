@@ -93,14 +93,15 @@ const EDITOR_TOOLS = [
         title: '打开场景',
         description:
             '打开指定场景资源。需要场景的 uuid（先用 asset.uuid 查）。\n' +
-            '⚠️ 引擎在资产库做自动刷新时，打开场景可能要 **30~60 秒** —— 这是引擎行为不是卡死。',
+            '⚠️ 引擎在资产库做自动刷新时，打开场景实测要 **26~54 秒** —— 这是引擎行为不是卡死。',
         inputSchema: { type: 'object', properties: { uuid: { type: 'string' } }, required: ['uuid'] },
         op: 'scene.open',
         safety: 'write',
-        // ⚠️ 必须大于 Bridge 侧的最坏预算（2 次 × 60s + 2 次健康检查 + 间隔 ≈ 138s），
-        //    否则客户端先超时，Bridge 还在重试 —— 用户看到的是「请求超时」，
-        //    而不是真正的原因（场景频道是否已经中毒）。
-        timeoutMs: 180000,
+        // ⚠️ 必须大于 Bridge 侧的最坏预算（见 handlers.js 的 sceneOpenBudgetMs()，
+        //    当前 111s），否则客户端先超时、而 Bridge 还在跑 ——
+        //    用户拿到的是一句没信息量的「请求超时」，而不是真正的原因。
+        //    预算与这个值的关系由 test/consistency.test.js 的断言守着。
+        timeoutMs: 150000,
     }),
     T('scene.create', {
         title: '新建场景',
@@ -110,6 +111,10 @@ const EDITOR_TOOLS = [
             properties: {
                 name: { type: 'string', description: '场景名' },
                 path: { type: 'string', description: '目录，如 db://assets/scenes' },
+                waitMs: {
+                    type: 'number',
+                    description: '等待引擎导入完成的上限（毫秒），默认 90000。超时后仍会返回，只是 imported=false。',
+                },
             },
             required: ['name'],
         },
@@ -128,7 +133,14 @@ const EDITOR_TOOLS = [
             let ready = false;
             let lastReason = null;
             while (Date.now() < deadline) {
-                const st = await ctx.call('asset.isImported', { url }).catch(() => null);
+                // ⚠️ 别把错误吞掉 —— 吞掉的话 lastReason 永远是 null，
+                //    超时提示只能说「（未知）」，模型完全不知道发生了什么。
+                let st = null;
+                try {
+                    st = await ctx.call('asset.isImported', { url });
+                } catch (e) {
+                    lastReason = `查询导入状态失败：${e.message}`;
+                }
                 if (st && st.imported) {
                     ready = true;
                     break;
@@ -147,6 +159,11 @@ const EDITOR_TOOLS = [
             };
         },
         safety: 'write',
+        // ⚠️ handler 型工具**不会**自动继承 hub 的默认超时
+        //    （ToolRegistry 只在 op 型路径上用 tool.timeoutMs），
+        //    所以阻塞型的 handler 必须自己声明 timeoutMs。
+        //    这里默认等 90s 导入，留 30s 余量。
+        timeoutMs: 120000,
     }),
     T('scene.save', {
         title: '保存场景',

@@ -65,17 +65,64 @@ class McpClient {
         this.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params: params || {} }) + '\n');
     }
     async call(name, args) {
-        const res = await this.request('tools/call', { name, arguments: args || {} });
+        const res = await this.request('tools/call', { name: this.resolveToolName(name), arguments: args || {} });
         if (res.error) return { isError: true, text: res.error.message };
         const text = (res.result.content || []).map((c) => c.text).join('\n');
         let data;
         try { data = JSON.parse(text); } catch (_) { data = text; }
         return { isError: !!res.result.isError, data, text };
     }
+
+    /**
+     * 解析真实的工具名。
+     *
+     * ⚠️ hub 在**多编辑器**模式下会给所有编辑器工具加 `<短名>__` 前缀。
+     *    而这些真机脚本写死的是无前缀名 —— 一旦同时有第二个编辑器实例
+     *    （e2e 测试自己就会注册一个 fake-editor 并保持十几秒），
+     *    所有调用都会变成「未知工具 xxx」，报告全篇失真。
+     */
+    async loadTools() {
+        const res = await this.request('tools/list', {});
+        const list = (res.result && res.result.tools) || [];
+        this.toolNames = new Set(list.map((t) => t.name));
+        this.prefixed = new Map();
+        for (const n of this.toolNames) {
+            const i = n.indexOf('__');
+            if (i > 0) {
+                const base = n.slice(i + 2);
+                if (!this.prefixed.has(base)) this.prefixed.set(base, []);
+                this.prefixed.get(base).push(n);
+            }
+        }
+        return this.toolNames;
+    }
+    resolveToolName(name) {
+        if (!this.toolNames) return name;
+        if (this.toolNames.has(name)) return name;
+        const cand = this.prefixed.get(name);
+        if (cand && cand.length === 1) return cand[0];
+        if (cand && cand.length > 1) {
+            throw new Error(
+                `工具 "${name}" 在当前有多个编辑器实例，必须先指定一个：` +
+                `设置环境变量 COCOS_MCP_EDITOR_FILTER=<短名> 后重跑。候选：${cand.join('、')}`
+            );
+        }
+        return name;
+    }
     close() { try { this.proc.kill(); } catch (_) {} }
 }
 
 function log(...a) { if (!AS_JSON) console.log(...a); }
+
+/**
+ * 记录一条断言（不走 check()，因为它检查的是**已有响应**而不是再调一次工具）。
+ * @param {boolean} cond 断言是否成立
+ */
+function assert(cond, name, detail) {
+    results.push({ name, status: cond ? 'ok' : 'fail', ms: 0, detail: detail || '' });
+    log(`  ${cond ? '✅' : '❌'} ${name}${detail ? '  ' + String(detail).slice(0, 110) : ''}`);
+    return cond;
+}
 
 /**
  * @param {object} opts
@@ -126,6 +173,16 @@ async function main() {
     client = new McpClient();
     await client.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke', version: '1' } });
     client.notify('notifications/initialized');
+    // ⚠️ 先取真实工具清单 —— 多编辑器时 hub 会给工具名加 <短名>__ 前缀，
+    //    写死的无前缀名会全部变成「未知工具」。
+    await client.loadTools();
+    if (client.prefixed.size && !client.toolNames.has('scene.tree')) {
+        console.error(
+            `检测到多个编辑器实例（${client.prefixed.size} 个带前缀的工具族），` +
+            '请用环境变量 COCOS_MCP_EDITOR_FILTER=<短名> 指定一个后重跑。'
+        );
+        process.exit(2);
+    }
 
     // ── 0. 工具面自检（静态）──────────────────────────────
     console.log('\n▸ 0. 工具面静态自检');
@@ -161,11 +218,17 @@ async function main() {
     //    "Open the previous scene failed: xxx can not be found"。
     const stale = await client.call('asset.query', { pattern: 'db://assets/scenes/__*.scene' });
     const staleList = (stale.data && stale.data.assets) || [];
+    let staleDeleted = 0;
     for (const a of staleList) {
-        if (a.url) await client.call('asset.delete', { url: a.url, confirm: true });
+        if (!a.url) continue;
+        const d = await client.call('asset.delete', { url: a.url, confirm: true });
+        if (!d.isError) staleDeleted += 1;
+        // 删不掉是有原因的（最常见：它正是当前打开的场景 ——
+        // Bridge 会挡住，那是对的，删了会让编辑器中毒）
     }
     if (staleList.length) {
-        log(`  ℹ️  清理上一轮残留场景 ${staleList.length} 个`);
+        log(`  ℹ️  清理上一轮残留场景 ${staleDeleted}/${staleList.length} 个` +
+            (staleDeleted < staleList.length ? '（删不掉的通常是当前打开的场景，Bridge 会挡住）' : ''));
         await new Promise((r) => setTimeout(r, 800));
     }
 
@@ -219,7 +282,16 @@ async function main() {
     const realPrefab = await client.call('asset.query', { pattern: 'db://assets/**/*.prefab' });
     const plist = (realPrefab.data && realPrefab.data.assets) || [];
     if (plist.length) {
-        await check('cocos_prefab_query', { filePath: plist[0].path || plist[0].url, selector: 'tree' });
+        // ⚠️ asset.query 返回的 `path` 是 **db:// URL**，不是文件系统路径 ——
+        //    直接拿它当 filePath 会被拼成 "<项目>/db:/assets/xxx" 然后被护栏拒掉。
+        //    真实路径要用 asset.path 工具查。
+        const pRes = await client.call('asset.path', { url: plist[0].url });
+        const fsPath = typeof pRes.data === 'string' ? pRes.data : null;
+        if (!fsPath) {
+            log('  ℹ️  拿不到 prefab 的文件系统路径，跳过离线 prefab 正例');
+        } else {
+            await check('cocos_prefab_query', { filePath: fsPath, selector: 'tree' });
+        }
     } else {
         log('  ℹ️  工程内没有 .prefab，跳过离线 prefab 正例');
     }
@@ -348,11 +420,34 @@ async function main() {
     const cs = (createdScene.data && createdScene.data.assets) || [];
     if (cs.length) {
         const u = await client.call('asset.uuid', { url: cs[0].url });
-        await check('scene.open', { uuid: u.data && u.data.uuid ? u.data.uuid : u.data });
-        await new Promise((r) => setTimeout(r, 1800));
-        await check('scene.save', {});
-        await check('scene.reload', { confirm: true });
-        await check('asset.delete', { url: cs[0].url, confirm: true });
+        const openRes = await check('scene.open', { uuid: u.data && u.data.uuid ? u.data.uuid : u.data });
+        if (openRes && openRes.isError) {
+            // ⚠️ 打开失败通常意味着**引擎侧的 scene 频道已经中毒** ——
+            //    后面所有场景操作都会挂。继续跑只会刷出一堆同源失败，
+            //    把「一个根因」变成「四个症状」，反而看不清问题。
+            //    这里明确停掉本段，并说明后续检查为什么没跑。
+            log('  ⚠️  scene.open 失败 → 引擎侧场景频道很可能已中毒，跳过本段剩余的场景检查');
+            log('     （save / reload / close / 根节点守卫都依赖同一个频道，跑也是超时）');
+        } else {
+            await new Promise((r) => setTimeout(r, 1800));
+            await check('scene.save', {});
+            await check('scene.reload', { confirm: true });
+            // ★ 真机验证新守卫：当前打开的场景**不能删** ——
+            //   删了会让编辑器留下指向已删除资源的引用，之后打开任何场景都会挂死。
+            await check('asset.delete', { url: cs[0].url, confirm: true }, { expectError: true });
+            // 先关闭场景，再删资源 —— 这是正确流程。
+            // ⚠️ 实测 3.8.8 在 general edit mode 下**关不掉**普通场景
+            //    （引擎返回 false 并打 “Trying to close current edit scene ...”），
+            //    所以这里不能假设它一定成功 —— 但**不能报假成功**：
+            //    引擎拒绝时必须明确说出来。
+            const closeRes = await client.call('scene.close', { confirm: true });
+            assert(
+                closeRes.isError ? /引擎拒绝关闭/.test(String(closeRes.text)) : true,
+                'scene.close 不报假成功（引擎拒绝关闭时要明确说出来）',
+                closeRes.isError ? String(closeRes.text).slice(0, 100) : '已关闭'
+            );
+            await check('asset.delete', { url: cs[0].url, confirm: true });
+        }
     } else {
         log('  ⚠️  scene.create 后没查到资源');
     }
@@ -364,19 +459,30 @@ async function main() {
     //    拿它去测「根节点不可删」会误判（实测会真的删掉一个节点，守卫形同虚设）。
     const treeNow = await client.call('scene.tree');
     const rootNow = treeNow.data && treeNow.data.root;
-    if (rootNow) {
-        await check('node.delete', { node: rootNow, confirm: true }, { expectError: true }); // 根节点不可删
+    if (treeNow.isError) {
+        // 场景频道已中毒 → 后面所有场景操作都必然超时，不该再刷一堆同源失败
+        log('  ⚠️  场景频道已不可用，跳过根节点守卫与 scene.close 检查');
     } else {
-        log('  ⚠️  读不到当前场景根节点，跳过根节点守卫检查');
-    }
-    // 清理本轮建出来的场景资源
-    if (sceneName) {
-        const sc2 = await client.call('asset.query', { pattern: `db://assets/scenes/${sceneName}.scene` });
-        for (const a of (sc2.data && sc2.data.assets) || []) {
-            await client.call('asset.delete', { url: a.url, confirm: true });
+        if (rootNow) {
+            await check('node.delete', { node: rootNow, confirm: true }, { expectError: true }); // 根节点不可删
+        } else {
+            log('  ⚠️  读不到当前场景根节点，跳过根节点守卫检查');
         }
+        // 清理本轮建出来的场景资源
+        if (sceneName) {
+            const sc2 = await client.call('asset.query', { pattern: `db://assets/scenes/${sceneName}.scene` });
+            for (const a of (sc2.data && sc2.data.assets) || []) {
+                await client.call('asset.delete', { url: a.url, confirm: true });
+            }
+        }
+        // 关闭场景放最后（引擎可能拒绝 → 明确报错，不报假成功）
+        const closeRes2 = await client.call('scene.close', { confirm: true });
+        assert(
+            closeRes2.isError ? /引擎拒绝关闭/.test(String(closeRes2.text)) : true,
+            'scene.close 不报假成功（引擎拒绝关闭时要明确说出来）',
+            closeRes2.isError ? String(closeRes2.text).slice(0, 100) : '已关闭'
+        );
     }
-    await check('scene.close', { confirm: true });   // 关闭场景放最后
 
     // ── 汇总 ──
     const failed = results.filter((r) => r.status !== 'ok');

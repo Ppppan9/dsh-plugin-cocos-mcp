@@ -271,25 +271,33 @@ test('别名表指向的消息名确实存在', () => {
 
 test('scene.open 的超时预算：hub 侧必须盖得住 Bridge 侧的最坏路径', () => {
     // ⚠️ 这是本轮差点漏掉的不变量：
-    //    Bridge 的 scene.open 最坏路径 = 健康检查 + open-scene + 间隔
-    //                            + open-scene + 失败后的强制健康检查
+    //    Bridge 的 scene.open 最坏路径 = 探活 + 查资源名 + open-scene + 失败后的强制探活。
     //    如果 hub 侧工具的 timeoutMs 小于它，客户端会先超时，
-    //    而 Bridge 还在重试 —— 用户看到的是「请求超时」而不是真正的原因
+    //    而 Bridge 还在跑 —— 用户看到的是「请求超时」而不是真正的原因
     //    （场景频道是不是已经中毒），排查方向会被带偏。
-    const attempts = Number((handlersSrc.match(/OPEN_ATTEMPTS\s*=\s*(\d+)/) || [])[1]);
-    const perTry = Number((handlersSrc.match(/OPEN_TIMEOUT_MS\s*=\s*(\d+)/) || [])[1]);
-    assert.ok(attempts > 0 && perTry > 0, '解析不到 Bridge 侧 scene.open 的超时预算');
-
-    // 健康检查相关开销：探活超时 8s + 失败后的强制探活 8s
-    const health = Number((handlersSrc.match(/SCENE_HEALTH_TIMEOUT_MS\s*=\s*(\d+)/) || [])[1]) || 8000;
-    const budget = attempts * perTry + health * 2 + 2000;
+    //
+    // ⚠️ 预算数字必须**从 Bridge 直接 require 求值**，不能去正则解析源码 ——
+    //    实测过正则解析的静默失效：`60_000` 数字分隔符、`60e3` 科学计数法
+    //    都会让算出来的预算塌缩成 18120ms 而断言**照样通过**；
+    //    常量改名后 `|| 兜底` 还会让它悄悄不再跟踪真实值。
+    //    断言一旦静默失效，就等于没有断言。
+    const { sceneOpenBudgetMs } = require('../extension/bridge/handlers');
+    assert.strictEqual(typeof sceneOpenBudgetMs, 'function', 'Bridge 必须导出 sceneOpenBudgetMs()');
+    const budget = sceneOpenBudgetMs();
+    assert.ok(budget > 0, '算出来的预算必须为正数');
 
     const tool = EDITOR_TOOLS.find((t) => t.name === 'scene.open');
     assert.ok(tool, '缺 scene.open 工具');
     assert.ok(
         tool.timeoutMs > budget,
         `hub 侧 scene.open 的 timeoutMs=${tool.timeoutMs}ms 盖不住 Bridge 侧最坏预算 ${budget}ms` +
-        '（客户端会先超时，Bridge 还在重试）'
+        '（客户端会先超时，Bridge 还在跑）'
+    );
+    // 也不能大得离谱 —— 用户干等太久同样是不可接受的体验。
+    assert.ok(
+        tool.timeoutMs < budget * 3,
+        `hub 侧 scene.open 的 timeoutMs=${tool.timeoutMs}ms 相对最坏预算 ${budget}ms 过大` +
+        '（用户要干等太久才拿到一个「请求超时」）'
     );
 });
 
@@ -320,15 +328,38 @@ test('README 提到的每个测试脚本都真实存在', () => {
     }
 });
 
-test('README 的验证数字与实际一致', () => {
+test('README 的验证章节：脚本存在，且可静态验证的数字与代码一致', () => {
     const pkg = JSON.parse(read('package.json'));
-    for (const key of ['test', 'test:e2e', 'test:smoke']) {
+    for (const key of ['test', 'test:e2e', 'test:smoke', 'test:real']) {
         assert.ok(pkg.scripts[key], `package.json 缺脚本 ${key}`);
     }
     // 三层验证脚本引用的文件必须存在
-    for (const f of ['test/e2e.js', 'test/tool-smoke.js', 'hub/test/transaction.test.js', 'hub/src/offline/test/offline.test.js']) {
+    for (const f of [
+        'test/e2e.js',
+        'test/tool-smoke.js',
+        'test/real-behavior.test.js',
+        'hub/test/transaction.test.js',
+        'hub/src/offline/test/offline.test.js',
+    ]) {
         assert.ok(fs.existsSync(path.join(ROOT, f)), `缺少 ${f}`);
     }
+    // README 的命令清单里必须提到每一个脚本入口 ——
+    // 只查「README 提到的文件存在」不查反方向，脚本会悄悄从文档里消失。
+    for (const cmd of ['npm test', 'npm run test:e2e', 'npm run test:smoke', 'npm run test:real']) {
+        assert.ok(readme.includes(cmd), `README 的命令清单里没有 ${cmd}`);
+    }
+    // ⚠️ **可静态验证的数字**必须与代码一致。
+    //    「覆盖全部 N 个工具」里的 N 是代码决定的，README 写错就该报错。
+    //    （各层测试的通过数是**运行时结果**，不在这条断言的范围 ——
+    //     把运行结果写进断言只会让它必然腐坏。）
+    const all = [...EDITOR_TOOLS, ...GLOBAL_TOOLS];
+    const cov = readme.match(/覆盖全部\s*(\d+)\s*个工具/);
+    assert.ok(cov, 'README 里找不到「覆盖全部 N 个工具」这句话');
+    assert.strictEqual(
+        Number(cov[1]),
+        all.length,
+        `README 写「覆盖全部 ${cov[1]} 个工具」，实际有 ${all.length} 个`
+    );
 });
 
 test('SOURCES.md 列出的每个调研仓库都真实存在对应引用', () => {

@@ -46,6 +46,16 @@ try {
     const libDir = path.join(MOCK_PROJECT, 'library', MOCK_UUID.slice(0, 2));
     fs.mkdirSync(libDir, { recursive: true });
     fs.writeFileSync(path.join(libDir, `${MOCK_UUID}.json`), '{}');
+    // ⚠️ .meta 文件也要造一个 ——
+    //    Bridge 查「资源是否存在 / 拿到 uuid」走的是**直接读 .meta**，
+    //    不走 asset-db（asset-db 在「还没导入完」时返回空，那正是最需要它的时候不可用）。
+    //    mock 不造 .meta 的话，url 分支会永远失败，测不到真实路径。
+    const assetsDir = path.join(MOCK_PROJECT, 'assets');
+    fs.mkdirSync(assetsDir, { recursive: true });
+    fs.writeFileSync(
+        path.join(assetsDir, 'a.prefab.meta'),
+        JSON.stringify({ ver: '1.1.0', importer: 'editor', uuid: MOCK_UUID, files: [], subMetas: {} })
+    );
 } catch (_) {
     /* ignore */
 }
@@ -260,7 +270,7 @@ const OP_ARGS = {
     'scene.tree': {},
     'scene.node': { node: 'child-uuid' },
     'scene.find': { name: 'Child' },
-    'scene.open': { uuid: 'uuid-1' },
+    'scene.open': { uuid: '11111111-2222-3333-4444-555555555555' },
     'scene.create': { name: 'NewScene' },
     'scene.save': {},
     'scene.close': {},
@@ -421,6 +431,17 @@ test('asset.isImported：拒绝 url 越权与非法 uuid', async () => {
         /url 或 uuid/,
         'url 和 uuid 都缺必须报错'
     );
+    // ⚠️ 目录穿越：库文件路径是
+    //    path.join(root, 'library', uuid.slice(0,2), uuid + '.json')，
+    //    如果 uuid 形如 '../..'，slice(0,2) 就是 '..' → 路径会跳出 library 目录，
+    //    变成「探测项目外文件是否存在」的信息泄露。必须靠 uuid 格式校验挡住。
+    for (const evil of ['../../etc/passwd', '..', '../secret', 'a/b', '..%2Fetc']) {
+        await assert.rejects(
+            () => handlers['asset.isImported']({ uuid: evil }),
+            /uuid 格式不合法/,
+            `含路径成分的 uuid "${evil}" 必须被拒`
+        );
+    }
 });
 
 test('scene.open：未导入完成时**在打开前**就拒绝，不去碰 open-scene', async () => {
@@ -450,6 +471,76 @@ test('scene.open：已导入完成时正常打开', async () => {
     assert.strictEqual(opened.length, 1, '已导入时应发出一次 open-scene');
 });
 
+test('asset.delete：拒绝删掉当前打开的场景（会毒化编辑器）', async () => {
+    // ⚠️ 删掉当前打开的场景后，编辑器会留下一个指向已删除资源的引用，
+    //    引擎打开下一个场景时先处理它、失败、然后 open-scene 永不返回
+    //    → 整个 scene 频道中毒。这条守卫是实测踩出来的。
+    resetSceneHealth();
+    const ctx = makeCtx();
+    const handlers = createHandlers(ctx);
+
+    // mock 的场景树根节点 uuid 是 'root-uuid'；
+    // 让 query-asset-info 对应地返回它，模拟「要删的就是当前场景」
+    const orig = ctx.msg;
+    ctx.msg = async (channel, message, ...args) => {
+        if (channel === 'asset-db' && message === 'query-asset-info') {
+            return { name: 'x', url: args[0], uuid: 'root-uuid' };
+        }
+        return orig(channel, message, ...args);
+    };
+
+    await assert.rejects(
+        () => handlers['asset.delete']({ url: 'db://assets/scenes/current.scene' }),
+        /不能删除当前打开的场景/,
+        '删除当前打开的场景必须被拦住'
+    );
+    const delCalls = ctx.calls.filter((c) => c[0] === 'asset-db' && c[1] === 'delete-asset');
+    assert.strictEqual(delCalls.length, 0, '被拦住时绝不能真的发出 delete-asset');
+
+    resetSceneHealth();
+});
+
+test('asset.delete：不是当前场景的资源照常能删', async () => {
+    resetSceneHealth();
+    const ctx = makeCtx();
+    const handlers = createHandlers(ctx);
+    const r = await handlers['asset.delete']({ url: 'db://assets/other.scene' });
+    assert.ok(r && r.deleted, '普通资源应当能删');
+    const delCalls = ctx.calls.filter((c) => c[0] === 'asset-db' && c[1] === 'delete-asset');
+    assert.strictEqual(delCalls.length, 1, '应该真的发出一次 delete-asset');
+    resetSceneHealth();
+});
+
+test('scene.close：引擎拒绝关闭时必须报错，不能报「已关闭」', async () => {
+    // ⚠️ 实测 3.8.8 在 general edit mode 下关不掉普通场景：
+    //    引擎返回 false 并打 "Trying to close current edit scene in general edit mode is not allowed"。
+    //    之前这里无条件返回 closed:true —— 假成功。模型据此以为场景已关，
+    //    接着去删资源/切场景，就会踩到后续一堆怪问题。
+    resetSceneHealth();
+    const ctx = makeCtx({
+        msg: async (channel, message, ...args) => {
+            if (channel === 'scene' && message === 'close-scene') return false;
+            return true;
+        },
+    });
+    const handlers = createHandlers(ctx);
+    await assert.rejects(
+        () => handlers['scene.close']({}),
+        /引擎拒绝关闭/,
+        '引擎拒绝关闭时必须明确报错，不能报 closed:true'
+    );
+    resetSceneHealth();
+});
+
+test('scene.close：引擎正常关闭时返回 closed:true', async () => {
+    resetSceneHealth();
+    const ctx = makeCtx();
+    const handlers = createHandlers(ctx);
+    const r = await handlers['scene.close']({});
+    assert.ok(r && r.closed === true, '正常关闭时返回 closed:true');
+    resetSceneHealth();
+});
+
 // ──────────────────── 场景频道健康闸门 ────────────────────
 
 test('场景频道卡死时，场景操作**快速失败**而不是干等到超时', async () => {
@@ -457,9 +548,11 @@ test('场景频道卡死时，场景操作**快速失败**而不是干等到超�
     //    但 bridge/ping 照常正常。没有这道闸门，调用方拿到的是一堆
     //    「超时」这种没信息量的错误，看不出真正原因。
     resetSceneHealth();
+    let probeCount = 0;
     const ctx = makeCtx({
         msg: async (channel, message, ...args) => {
-            if (channel === 'scene') {
+            if (channel === 'scene' && message === 'query-dirty') {
+                probeCount += 1;
                 // 模拟「频道已死」：永不返回
                 await new Promise(() => {});
             }
@@ -475,34 +568,83 @@ test('场景频道卡死时，场景操作**快速失败**而不是干等到超�
         '频道死了必须给出可行动的提示，而不是干等'
     );
     const spent = Date.now() - t0;
-    // 健康检查超时是 8s —— 绝不能拖到 30s+ 的操作超时
+    // 探活超时是 8s —— 绝不能拖到 30s+ 的操作超时
     assert.ok(spent < 20000, `失败应该很快返回，实际等了 ${spent}ms`);
 
-    // 连续失败两次后 → 判定频道已死，后续调用**立刻**失败（不再等健康检查超时）
+    // 第一次失败只是「响应异常」，还不能判死（编辑器正忙时会这样）
     await assert.rejects(
         () => handlers['scene.tree']({}),
-        /场景频道|重启/,
-        '第二次健康检查失败也要报错'
+        /场景频道响应异常/,
+        '第一次探活失败应报「响应异常」而不是直接判死'
     );
+    assert.strictEqual(probeCount, 1, 'TTL 窗口内的后续调用必须继承上次探活结果，不能再发探活');
+
+    // 跨过 TTL 之后再失败一次 → 判死
+    await new Promise((r) => setTimeout(r, 8200));
+    await assert.rejects(
+        () => handlers['scene.tree']({}),
+        /场景频道不可用/,
+        '两个独立探活轮次都失败后才判死'
+    );
+
+    // 判死后：立刻失败，不再等探活超时
     const t1 = Date.now();
     await assert.rejects(
         () => handlers['scene.tree']({}),
         /场景频道不可用/,
-        '连续失败后应判定频道已死'
+        '判死后应立刻失败'
     );
-    assert.ok(Date.now() - t1 < 3000, '判定已死后应立刻失败，不再等健康检查超时');
+    assert.ok(Date.now() - t1 < 3000, '判死后不应再等探活超时');
+
+    resetSceneHealth();
+});
+
+test('并发调用共享同一次探活（不能各自发探活、也不能把一次忙碌算成多次失败）', async () => {
+    // ⚠️ hub 侧同一批写入的多条 JSON-RPC 是**并发**分发的（server.js 里没有 await）。
+    //    如果每个并发调用各自探活：
+    //      - 一次「编辑器忙」会被按并发数累加到 failures → 误判成「频道已死」，
+    //        把用户的场景功能整个锁死；
+    //      - 而且探活消息会打出一堆。
+    resetSceneHealth();
+    let probeCount = 0;
+    const ctx = makeCtx({
+        msg: async (channel, message, ...args) => {
+            if (channel === 'scene' && message === 'query-dirty') {
+                probeCount += 1;
+                await new Promise((r) => setTimeout(r, 50));
+                return true;
+            }
+            return true;
+        },
+    });
+    const handlers = createHandlers(ctx);
+
+    const results = await Promise.allSettled([
+        handlers['scene.tree']({}),
+        handlers['scene.tree']({}),
+        handlers['scene.tree']({}),
+        handlers['scene.tree']({}),
+    ]);
+    assert.strictEqual(probeCount, 1, `4 个并发调用只应发 1 次探活，实际发了 ${probeCount} 次`);
+    assert.ok(
+        results.every((r) => r.status === 'fulfilled'),
+        '并发调用都应该成功（频道是健康的）'
+    );
 
     resetSceneHealth();
 });
 
 test('健康检查偶发失败不判死（编辑器忙的时候不能误锁）', async () => {
     // ⚠️ 一次失败就永久判死 = 把闸门本身变成新的故障源。
-    //    编辑器正忙（构建 / 批量导入）时 query-is-ready 可能几秒不回。
+    //    编辑器正忙（构建 / 批量导入）时探活可能几秒不回。
+    //    正确语义：第一次失败 → 报「响应异常，可重试」，**不判死**；
+    //    TTL 窗口内的后续调用继承这个失败（不重复探活）；
+    //    跨过 TTL 后再探一次 → 成功就恢复正常。
     resetSceneHealth();
     let failNext = true;
     const ctx = makeCtx({
         msg: async (channel, message, ...args) => {
-            if (channel === 'scene' && message === 'query-is-ready' && failNext) {
+            if (channel === 'scene' && message === 'query-dirty' && failNext) {
                 failNext = false;
                 throw new Error('模拟编辑器繁忙');
             }
@@ -511,10 +653,23 @@ test('健康检查偶发失败不判死（编辑器忙的时候不能误锁）',
     });
     const handlers = createHandlers(ctx);
 
-    await assert.rejects(() => handlers['scene.tree']({}), /场景频道|重启/);
-    // 第二次探测应该成功 → 频道被判为健康 → 后续操作正常
+    // 第一次：报「响应异常」而不是「不可用」—— 关键是没有被误判成频道已死
+    await assert.rejects(
+        () => handlers['scene.tree']({}),
+        /场景频道响应异常/,
+        '第一次失败应报「响应异常（可重试）」，不能直接判死'
+    );
+    // TTL 窗口内：继承失败，不重复探活，也不升级成「不可用」
+    await assert.rejects(
+        () => handlers['scene.tree']({}),
+        /场景频道响应异常/,
+        'TTL 窗口内应继承上次的失败结果，不升级成判死'
+    );
+
+    // 跨过 TTL → 重新探活 → 成功 → 恢复正常
+    await new Promise((r) => setTimeout(r, 8200));
     const res = await handlers['scene.tree']({});
-    assert.ok(res && Array.isArray(res.nodes), '偶发失败后应恢复正常，不该把频道锁死');
+    assert.ok(res && Array.isArray(res.nodes), '探活恢复后应正常工作，不该把频道锁死');
     resetSceneHealth();
 });
 

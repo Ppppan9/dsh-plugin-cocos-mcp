@@ -103,7 +103,7 @@ class McpClient {
 
     /** 调用工具，返回解析后的 content 文本。 */
     async callTool(name, args) {
-        const res = await this.request('tools/call', { name, arguments: args || {} });
+        const res = await this.request('tools/call', { name: this.resolveToolName(name), arguments: args || {} });
         // 协议级错误（未知工具 / 参数非法）按 MCP 规范走 JSON-RPC error，
         // 工具执行错误走 isError + content。两种都表示「这次调用失败了」。
         if (res.error) return { isError: true, text: res.error.message, protocolError: true };
@@ -115,6 +115,46 @@ class McpClient {
             data = text;
         }
         return { isError: !!res.result.isError, data, text };
+    }
+
+    /**
+     * 解析真实的工具名。
+     *
+     * ⚠️ hub 在**多编辑器**模式下会给所有编辑器工具加 `<短名>__` 前缀。
+     *    本文件第 8 节会自己注册一个 fake-editor（并保持十几秒），
+     *    于是 hub 立刻进入多编辑器模式 —— 写死的无前缀名会全部变成「未知工具」。
+     *    所以每次调用前都按当前 tools/list 解析。
+     */
+    async loadTools() {
+        const res = await this.request('tools/list', {});
+        const list = (res.result && res.result.tools) || [];
+        this.toolNames = new Set(list.map((t) => t.name));
+        this.prefixed = new Map();
+        for (const n of this.toolNames) {
+            const i = n.indexOf('__');
+            if (i > 0) {
+                const base = n.slice(i + 2);
+                if (!this.prefixed.has(base)) this.prefixed.set(base, []);
+                this.prefixed.get(base).push(n);
+            }
+        }
+        return this.toolNames;
+    }
+    resolveToolName(name) {
+        if (!this.toolNames) return name;
+        if (this.toolNames.has(name)) return name;
+        const cand = this.prefixed.get(name);
+        if (cand && cand.length === 1) return cand[0];
+        if (cand && cand.length > 1) {
+            // 多个候选：优先挑**不带 fake 前缀**的那个（测试自己注册的那个是假的）
+            const real = cand.filter((n) => !/fake/i.test(n));
+            if (real.length === 1) return real[0];
+            throw new Error(
+                `工具 "${name}" 在当前有多个候选：${cand.join('、')}。` +
+                '请用环境变量 COCOS_MCP_EDITOR_FILTER=<短名> 指定一个后重跑。'
+            );
+        }
+        return name;
     }
 
     close() {
@@ -175,6 +215,9 @@ async function main() {
         assert(r.serverInfo && r.serverInfo.name === 'cocos-mcp', 'serverInfo 正确', JSON.stringify(r.serverInfo));
         assert(typeof r.instructions === 'string' && r.instructions.length > 100, '带 instructions 引导', `${(r.instructions || '').length} 字`);
         client.notify('notifications/initialized');
+        // ⚠️ 先取真实工具清单 —— 多编辑器时 hub 会给工具名加 <短名>__ 前缀。
+        //    本文件第 8 节会注册 fake-editor，hub 随即进入多编辑器模式。
+        await client.loadTools();
         const ping = await client.request('ping', {});
         assert(!ping.error, 'ping 正常');
 

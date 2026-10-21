@@ -2,6 +2,7 @@
 
 const { EDITOR_TOOLS } = require('./editor-tools');
 const { GLOBAL_TOOLS } = require('./global-tools');
+const { DEFAULT_TIMEOUT_MS } = require('../editor-client');
 
 /**
  * 工具面装配与调度
@@ -179,17 +180,48 @@ class ToolRegistry {
         };
 
         if (kind === 'global') {
-            return await tool.handler(args, ctx);
+            return await this._withTimeout(tool, () => tool.handler(args, ctx));
         }
 
         if (!entry.editor) {
             throw new Error('当前没有连接到任何 Cocos Creator 实例。请先打开项目并启用 cocos-mcp 扩展。');
         }
         if (tool.handler) {
-            return await tool.handler(args, ctx);
+            // ⚠️ handler 型工具也必须走超时 ——
+            //    之前只有 op 型路径有超时，handler 型直接 await，
+            //    一个卡住的 handler（比如 scene.create 轮询导入）能把请求挂到天荒地老。
+            return await this._withTimeout(tool, () => tool.handler(args, ctx));
         }
         const result = await client.invoke(tool.op, args, { timeoutMs: tool.timeoutMs });
         return result;
+    }
+
+    /**
+     * 给工具调用加超时。
+     *
+     * ⚠️ 超时必须是**硬超时** —— 超时后请求已经发出去了，
+     *    引擎那边可能还在跑。所以错误信息要说清楚是「客户端等超时了」，
+     *    而不是「操作失败」（后者会误导模型以为没执行）。
+     */
+    async _withTimeout(tool, fn) {
+        const timeoutMs = tool.timeoutMs || DEFAULT_TIMEOUT_MS;
+        if (!timeoutMs || timeoutMs <= 0) return await fn();
+        let timer = null;
+        const timeout = new Promise((_, reject) => {
+            timer = setTimeout(() => {
+                const err = new Error(
+                    `工具 "${tool.name}" 执行超时（${timeoutMs}ms）。` +
+                    '调用可能仍在编辑器里继续执行，请先查询实际状态再决定是否重试。'
+                );
+                err.code = 'TOOL_TIMEOUT';
+                reject(err);
+            }, timeoutMs);
+        });
+        try {
+            return await Promise.race([fn(), timeout]);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
     }
 }
 

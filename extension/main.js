@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const { createBridge } = require('./bridge/server');
-const { createHandlers } = require('./bridge/handlers');
+const { createHandlers, resetSceneHealth } = require('./bridge/handlers');
 const { listChannels } = require('./bridge/messages');
 
 /**
@@ -357,6 +357,11 @@ exports.methods = {
         // ⚠️ .dev/refresh 的热重载 watcher 之前只在 exports.load 里启动，
         //    stopBridge 会把它清掉 → 重启 Bridge 后热重载通道永久失效。
         startRefreshWatcher();
+        // ⚠️ 必须清掉「场景频道已中毒」的闸门状态 ——
+        //    它是 handlers.js 的**模块级**状态，而 restartBridge 只重启了
+        //    HTTP 服务、**没有重新加载模块** → 不清的话点了「重启 Bridge」
+        //    场景工具仍然全部报「场景频道不可用」，用户会以为这个按钮没用。
+        resetSceneHealth();
         return { ok: true, url: bridge ? bridge.url : null };
     },
 };

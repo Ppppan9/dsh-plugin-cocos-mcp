@@ -214,22 +214,27 @@ echo "restart-package" > <你的项目>/.dev/refresh
 ## 开发与验证
 
 ```bash
-npm test              # 全部单测（34 个用例：离线编辑器 26 + 事务回滚 8）
+npm test              # 全部单测（离线编辑器 + 事务回滚 + 一致性 + Bridge op 逐个冒烟）
 npm run test:e2e      # 端到端（需要 Cocos Creator 开着并装了扩展）
-npm run test:smoke    # 全工具冒烟（67 次调用，覆盖全部 59 个工具）
+npm run test:smoke    # 全工具冒烟（每一个工具都真跑一遍）
+npm run test:real     # 真机行为验证（把「必须真机才能定论」的条目跑清楚）
 ```
 
 > ⚠️ `node --test <目录>` 在 Node 22.22 上会把目录当模块加载而失败，**必须用文件通配符**。
 > （这个坑现存开源项目里也踩过，README 里都没写。）
+> ⚠️ 后三个脚本**需要真机**（Cocos Creator 开着 + 装了扩展），不能当普通单测跑。
 
 ### 三层验证
 
-| 层 | 脚本 | 覆盖 | 当前 |
+| 层 | 脚本 | 覆盖 | 最近一次实测 |
 |---|---|---|---|
-| 单测 | `hub/test/` + `hub/src/offline/test/` + `test/consistency.test.js` + `test/handler-smoke.test.js` | 离线 prefab/anim 读写、事务 undo 日志、文档/清单一致性、**逐个调用全部 Bridge op** | **90/90** |
-| 端到端 | `test/e2e.js` | MCP 握手 → 工具面 → 真实读取 → **真实写入闭环** → **事务失败真回滚** → 安全护栏 → Resources → 离线能力 → 路径护栏 → 多编辑器前缀隔离 | **59/59** |
-| 全工具冒烟 | `test/tool-smoke.js` | **每一个**工具都真跑一遍 + 工具面静态自检 | **82/82** |
-| 真机行为 | `test/real-behavior.test.js` | 把「代码看不出对错、必须真机才能定论」的条目逐条跑清楚：剪切→粘贴闭环、组件真被摘掉、越界写被拦、20 并发、事务回滚 | **33/33** |
+| 单测 | `hub/test/` + `hub/src/offline/test/` + `test/consistency.test.js` + `test/handler-smoke.test.js` | 离线 prefab/anim 读写、事务 undo 日志、文档/清单一致性、**逐个调用全部 Bridge op**、场景频道健康闸门 | **99/99** |
+| 端到端 | `test/e2e.js` | MCP 握手 → 工具面 → 真实读取 → **真实写入闭环** → **事务失败真回滚** → 安全护栏 → Resources → 离线能力 → 路径护栏 → 多编辑器前缀隔离 | **60/60** |
+| 全工具冒烟 | `test/tool-smoke.js` | **每一个**工具都真跑一遍 + 工具面静态自检 | **84/84**（覆盖全部 70 个工具） |
+| 真机行为 | `test/real-behavior.test.js` | 把「代码看不出对错、必须真机才能定论」的条目逐条跑清楚：剪切→粘贴闭环、组件真被摘掉、越界写被拦、20 并发、事务回滚、**未导入场景前置拦截**、**离线写盘事务** | **49/49** |
+
+> 上面这一列是**运行结果**，会随迭代变化 —— 以实际跑出来的输出为准。
+> README 里的**工具数**（70）由一致性测试守着，改了代码没改文档会直接报错。
 
 > ⏱ 后两层要连真机 Cocos Creator，**耗时以分钟计** —— Cocos 的场景导入本身就要几十秒
 > （新建场景 → 导入 → 打开 ≈ 40-70s，这是引擎行为不是我们慢）。
@@ -248,8 +253,10 @@ npm run test:smoke    # 全工具冒烟（67 次调用，覆盖全部 59 个工�
 | 声称「`scene.snapshot` 可编排事务回滚」 | **回滚是假的** | 实测 snapshot-abort / cancel-recording 都不回滚 → 改为自带 undo 日志（`hub/src/tools/transaction.js`） |
 | 路径护栏无法放宽 | 改不了项目外的美术资源库 | 新增 `COCOS_MCP_EXTRA_ROOTS` 环境变量，错误信息里给出用法 |
 | `COCOS_MCP_EDITOR_FILTER` 只在扩展端写、hub 端没实现 | 复制出来的配置无效 | hub 端实现过滤 |
-| `scene:open-scene` 失败时不 reject 消息 | 调用方干等到客户端超时 | Bridge 侧自己兜超时（单次 60s × 2 次），并把「资源可能还没导入完」写进错误信息 |
-| **一次 `open-scene` 挂死会让整个 scene 频道从此中毒**（`query-node-tree` 永远不返回，但 `bridge/ping` 正常） | 后面所有场景操作全部挂住，错误信息只是一堆没信息量的「超时」 | 加**频道健康闸门**：每次场景操作前探活，连续失败 2 次才判死，判死后立刻失败并提示「请重启 Cocos Creator」，每 30 秒给一次自愈机会 |
+| `scene:open-scene` 失败时不 reject 消息 | 调用方干等到客户端超时 | Bridge 侧自己兜超时（单次 90s，**不重试**），并把「资源可能还没导入完」写进错误信息 |
+| **一次 `open-scene` 挂死会让整个 scene 频道从此中毒**（`query-node-tree` 永远不返回，但 `bridge/ping` 正常） | 后面所有场景操作全部挂住，错误信息只是一堆没信息量的「超时」 | 加**频道健康闸门**：每次场景操作前用 `query-dirty` 探活（不能用 `query-is-ready` —— 它中毒后仍 3ms 正常返回，探不出病灶），连续两个**独立**轮次失败才判死，判死后立刻失败并提示「请重启 Cocos Creator」，每 30 秒给一次自愈机会 |
+| `scene.close` 引擎其实**关不掉**（general edit mode 下返回 false） | 报 `closed:true` 是**假成功**，模型以为场景已关 | 引擎拒绝时明确报错，并说明「切换场景直接用 scene.open，不需要先关」 |
+| **删掉当前打开的场景**资源 | 编辑器留下指向已删除资源的引用，之后打开任何场景都挂死 | Bridge 守卫拦下，提示先 `scene.close` |
 | 打开一个**还没导入完**的场景 | 发出 `open-scene` → 失败 → **频道中毒** | 打开前先查本地库产物文件（`library/<xx>/<uuid>.json`）是否存在，**不导入完直接拒绝**，不碰引擎 |
 | 删根节点 / 删不存在的组件 / 删不存在的资源**返回"成功"** | 假成功比报错更危险 | 三处都改成明确拦截或明确报错 |
 | 缺少必填参数时编辑器只回一句 `parameter error` | 模型不知道是自己少传了东西 | Bridge 层前置参数校验，回中文明确错误 |
@@ -259,9 +266,10 @@ npm run test:smoke    # 全工具冒烟（67 次调用，覆盖全部 59 个工�
 - **`scene:snapshot` / `snapshot-abort` / `begin-recording` / `cancel-recording` 全都不回滚任何修改**，
   尽管官方 i18n 描述写着 "for undo"。→ 事务必须自己实现 undo 日志。
 - **`scene:open-scene` 失败时不 resolve 也不 reject** → 必须自己兜超时。
+- **一组节点操作（建/复制/移动/剪贴板）之后，下一次打开场景必挂死** → 引擎自身的问题，只能靠超时 + 健康闸门兜住。
 - **它挂死一次，整个 scene 频道就中毒了**（`query-node-tree` 永远不返回，`bridge/ping` 却正常）→ 必须有健康闸门。
 - **打开场景实测要 26~54 秒**（资产库做 auto refresh 时引擎会等它）→ 超时设短了会把「慢但成功」误判成失败，
-  而失败后的重试是在引擎半开着的状态下继续折腾，**才真的把频道搞死**。宁可一次给足 60s。
+  而失败后的重试是在引擎半开着的状态下继续折腾，**才真的把频道搞死**。宁可一次给足 90s，也不要重试。
 - **「导入完成」的可靠判据是本地库产物文件** `<项目>/library/<uuid前2位>/<uuid>.json` 是否存在；
   `query-asset-info` 在资源刚创建时就立刻返回非空、其 `imported` 字段也是 true —— 那是假信号。
 - **`console:query` 消息不存在**，读控制台只能用 `Editor.Logger.query()`。
