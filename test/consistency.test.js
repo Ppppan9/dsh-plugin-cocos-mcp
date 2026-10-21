@@ -345,6 +345,29 @@ test('每个工具声明的 inputSchema 都是自洽的', () => {
     }
 });
 
+test('每个 handler 读取的参数都已在 schema 里声明（否则参数校验会误伤）', () => {
+    // ⚠️ 参数校验现在真的会执行 —— 所以 handler 里读了、schema 却没声明的参数，
+    //    会被当成「未知参数」把**合法调用**拒掉。
+    //    这条断言就是防这个的（真踩过：scene.transaction 的 op.args.confirm
+    //    一度被当成工具自身的参数）。
+    //
+    // ⚠️ 正则只匹配**工具自身的** args.X：
+    //    `op.args.confirm` 这种嵌套 op 的参数不算（用负向断言排除）。
+    const RE = /(?<![\w.$])args\.([A-Za-z_][A-Za-z0-9_]*)/g;
+    for (const t of [...EDITOR_TOOLS, ...GLOBAL_TOOLS]) {
+        if (!t.handler) continue;
+        const declared = new Set(Object.keys((t.inputSchema || {}).properties || {}));
+        const body = String(t.handler);
+        const used = new Set([...body.matchAll(RE)].map((m) => m[1]));
+        const missing = [...used].filter((k) => !declared.has(k));
+        assert.deepStrictEqual(
+            missing,
+            [],
+            `${t.name} 的 handler 读了未在 schema 里声明的参数：${missing.join('、')}（会被参数校验当成「未知参数」拒掉）`
+        );
+    }
+});
+
 test('README 的工具清单与实际工具一致', () => {
     const all = [...EDITOR_TOOLS, ...GLOBAL_TOOLS];
     // README 里写的工具数量
