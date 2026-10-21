@@ -90,6 +90,25 @@ test('validate：stale 只在「除心跳外没有其它问题」时才成立（
     assert.strictEqual(good.stale, true, '只有心跳超时时才标 stale');
 });
 
+test('validate：stale 有宽限期，超过就不算 stale（避免幽灵实例永久占用）', () => {
+    // ⚠️ 幽灵实例：编辑器崩了 → pid 被系统回收后分配给别的进程 →
+    //    注册文件还在、pid 还活着 → 被判成「编辑器正忙」而**永久保留** →
+    //    hub 以为有 2 个编辑器，逼着模型给工具名加前缀（而真实只有一个）。
+    //    真实的编辑器一不忙心跳就恢复，所以给一个**有界**宽限期即可。
+    const now = Date.now();
+    const at = (msAgo) => validate(entry({ ts: now - msAgo }), now, STALE_MS);
+
+    assert.strictEqual(at(10 * 1000).stale, false, '心跳新鲜不该是 stale');
+    assert.strictEqual(at(60 * 1000).stale, false, '心跳正常不该是 stale');
+    const busy = at(200 * 1000);
+    assert.strictEqual(busy.ok, true, '宽限期内：编辑器正忙，实例要保留');
+    assert.strictEqual(busy.stale, true, '宽限期内：应标成 stale（正忙）');
+
+    const ghost = at(400 * 1000);
+    assert.strictEqual(ghost.ok, false, '超过宽限期仍无心跳 → 判为幽灵，丢弃');
+    assert.strictEqual(ghost.stale, false, '幽灵不能算 stale');
+});
+
 test('dedupeShortNames：同项目多份注册 → 一个当代表，其余改名 -dup<pid>', () => {
     // 真实场景：编辑器 spawn 竞态双开 → 同一个项目注册了两份。
     // 设计不是「丢掉一个」（那样就有一个实例调不到了），而是

@@ -23,6 +23,20 @@ const path = require('path');
 
 const REGISTRY_DIR = path.join(os.homedir(), '.cocos-mcp', 'editors');
 const STALE_MS = 120000;
+/**
+ * stale 实例的**宽限期**（毫秒）。
+ *
+ * ⚠️ 为什么要有上限：stale 记录会被**保留**（编辑器只是正忙），
+ *    但如果那个 pid 其实已经被系统回收并分配给别的进程，
+ *    这条记录就成了「幽灵实例」—— 永远不会被回收（pid 还活着），
+ *    于是 hub 以为有 2 个编辑器，**逼着模型给工具名加前缀**，
+ *    而真实情况只有一个编辑器。
+ *
+ *    真实的编辑器一旦不忙，心跳立刻恢复 → 记录变回 fresh。
+ *    所以给一个**有界**的宽限期：宽限期内按「正忙」处理（快速失败 + 提示），
+ *    超过宽限期仍然没有心跳 → 判定为幽灵，丢弃。
+ */
+const STALE_GRACE_MS = 180000;
 const SCAN_INTERVAL_MS = 15000;
 
 function readAll(dir = REGISTRY_DIR) {
@@ -80,7 +94,7 @@ function isLoopbackUrl(url) {
  *      - **进程还在、只是心跳超时** → 保留，但标记 `stale`，
  *        让上层报「编辑器无响应，可能正在忙」而不是「没装扩展」。
  */
-function validate(entry, now = Date.now(), staleMs = STALE_MS) {
+function validate(entry, now = Date.now(), staleMs = STALE_MS, graceMs = STALE_GRACE_MS) {
     const reasons = [];
     let stale = false;
     if (!entry || typeof entry !== 'object') reasons.push('记录不是对象');
@@ -94,8 +108,13 @@ function validate(entry, now = Date.now(), staleMs = STALE_MS) {
         if (!ts) reasons.push('缺少心跳时间戳');
         else if (now - ts > staleMs) {
             // 进程还在 → 只是没心跳（编辑器忙 / 场景频道卡死），不是「实例没了」
-            if (alive) stale = true;
-            else reasons.push(`心跳超时（${Math.round((now - ts) / 1000)}s）`);
+            if (alive && now - ts <= staleMs + graceMs) stale = true;
+            else if (alive) {
+                // 超过宽限期仍无心跳 → 大概率是「幽灵实例」（pid 被回收后复用）
+                reasons.push(`心跳超时过久（${Math.round((now - ts) / 1000)}s）`);
+            } else {
+                reasons.push(`心跳超时（${Math.round((now - ts) / 1000)}s）`);
+            }
         }
     }
     // ⚠️ **stale 只在「除心跳外没有其它问题」时才成立** ——
@@ -261,4 +280,13 @@ class EditorRegistry {
     }
 }
 
-module.exports = { EditorRegistry, validate, dedupeShortNames, isPidAlive, isLoopbackUrl, REGISTRY_DIR, STALE_MS };
+module.exports = {
+    EditorRegistry,
+    validate,
+    dedupeShortNames,
+    isPidAlive,
+    isLoopbackUrl,
+    REGISTRY_DIR,
+    STALE_MS,
+    STALE_GRACE_MS,
+};
