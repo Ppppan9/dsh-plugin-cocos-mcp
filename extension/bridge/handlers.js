@@ -628,18 +628,25 @@ function createHandlers(ctx) {
 
             // 已导入但仍然失败 → 重试（引擎侧偶发失败）
             let lastErr = null;
-            // ⚠️ 总预算必须小于 hub 侧 scene.open 的 timeoutMs（150s），
+            // ⚠️ 总预算必须小于 hub 侧 scene.open 的 timeoutMs（180s），
             //    否则客户端会先超时，Bridge 还在重试 —— 白白挂住。
             //
-            // ⚠️ 2 次 × 45s 太短了 —— 实测引擎在某些状态下打开场景要 **50 秒以上**
-            //    （日志里能看到 "auto refresh because script compiled or scene changed"，
-            //    资产库在做自动刷新时引擎会等它）。
-            //    45s 的超时会把「慢但最终成功」误判成失败；而失败之后的重试
-            //    又是在引擎半开着的状态下继续折腾，才真的把 scene 频道搞死。
-            //    放宽到 65s：一次尝试就能覆盖绝大多数慢场景，
-            //    两次尝试的最坏预算 132s，仍小于 hub 侧 150s 的客户端超时。
+            // ⚠️ 超时预算必须**算清楚**，否则客户端会先超时，而 Bridge 还在重试 ——
+            //    白白挂住，而且错误信息会变成客户端的「请求超时」而不是真正的原因。
+            //
+            //    最坏路径逐项累加：
+            //      健康检查(≤8s) + open-scene(≤60s) + 间隔(2s)
+            //      + 健康检查(TTL 命中，0s) + open-scene(≤60s)
+            //      + 失败后的强制健康检查(≤8s)
+            //      = 138s
+            //    hub 侧 scene.open 工具的 timeoutMs 是 180000（180s）→ 留 42s 余量。
+            //
+            // ⚠️ 为什么是 60s 而不是更短：实测引擎在资产库做 auto refresh 时
+            //    打开场景要 26~54 秒。超时设 45s 会把「慢但最终成功」误判成失败，
+            //    而失败之后的重试是在引擎**半开着的状态**下继续折腾，
+            //    才真的把 scene 频道搞死。宁可一次给足，不要设短了再重试。
             const OPEN_ATTEMPTS = 2;
-            const OPEN_TIMEOUT_MS = 65000;
+            const OPEN_TIMEOUT_MS = 60000;
             for (let attempt = 1; attempt <= OPEN_ATTEMPTS; attempt++) {
                 try {
                     await send(

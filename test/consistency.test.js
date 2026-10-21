@@ -269,6 +269,30 @@ test('别名表指向的消息名确实存在', () => {
 
 // ────────────────────────────── 文档一致性 ──────────────────────────────
 
+test('scene.open 的超时预算：hub 侧必须盖得住 Bridge 侧的最坏路径', () => {
+    // ⚠️ 这是本轮差点漏掉的不变量：
+    //    Bridge 的 scene.open 最坏路径 = 健康检查 + open-scene + 间隔
+    //                            + open-scene + 失败后的强制健康检查
+    //    如果 hub 侧工具的 timeoutMs 小于它，客户端会先超时，
+    //    而 Bridge 还在重试 —— 用户看到的是「请求超时」而不是真正的原因
+    //    （场景频道是不是已经中毒），排查方向会被带偏。
+    const attempts = Number((handlersSrc.match(/OPEN_ATTEMPTS\s*=\s*(\d+)/) || [])[1]);
+    const perTry = Number((handlersSrc.match(/OPEN_TIMEOUT_MS\s*=\s*(\d+)/) || [])[1]);
+    assert.ok(attempts > 0 && perTry > 0, '解析不到 Bridge 侧 scene.open 的超时预算');
+
+    // 健康检查相关开销：探活超时 8s + 失败后的强制探活 8s
+    const health = Number((handlersSrc.match(/SCENE_HEALTH_TIMEOUT_MS\s*=\s*(\d+)/) || [])[1]) || 8000;
+    const budget = attempts * perTry + health * 2 + 2000;
+
+    const tool = EDITOR_TOOLS.find((t) => t.name === 'scene.open');
+    assert.ok(tool, '缺 scene.open 工具');
+    assert.ok(
+        tool.timeoutMs > budget,
+        `hub 侧 scene.open 的 timeoutMs=${tool.timeoutMs}ms 盖不住 Bridge 侧最坏预算 ${budget}ms` +
+        '（客户端会先超时，Bridge 还在重试）'
+    );
+});
+
 test('README 的工具清单与实际工具一致', () => {
     const all = [...EDITOR_TOOLS, ...GLOBAL_TOOLS];
     // README 里写的工具数量

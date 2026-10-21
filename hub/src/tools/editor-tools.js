@@ -91,11 +91,16 @@ const EDITOR_TOOLS = [
     }),
     T('scene.open', {
         title: '打开场景',
-        description: '打开指定场景资源。需要场景的 uuid（先用 asset.uuid 查）。',
+        description:
+            '打开指定场景资源。需要场景的 uuid（先用 asset.uuid 查）。\n' +
+            '⚠️ 引擎在资产库做自动刷新时，打开场景可能要 **30~60 秒** —— 这是引擎行为不是卡死。',
         inputSchema: { type: 'object', properties: { uuid: { type: 'string' } }, required: ['uuid'] },
         op: 'scene.open',
         safety: 'write',
-        timeoutMs: 150000,
+        // ⚠️ 必须大于 Bridge 侧的最坏预算（2 次 × 60s + 2 次健康检查 + 间隔 ≈ 138s），
+        //    否则客户端先超时，Bridge 还在重试 —— 用户看到的是「请求超时」，
+        //    而不是真正的原因（场景频道是否已经中毒）。
+        timeoutMs: 180000,
     }),
     T('scene.create', {
         title: '新建场景',
