@@ -145,7 +145,9 @@ const EDITOR_TOOLS = [
             //      负数 → 报错（校验层也会拦）。
             const waitRaw = Number(args.waitMs);
             let waitMs = 90000;
-            if (args.waitMs !== undefined && Number.isFinite(waitRaw)) {
+            // ⚠️ null 也要当「没传」—— Number(null) 是 0，会被当成「不等」，
+            //    语义完全跑偏（校验层会拦，但 handler 层也要自己兜住）。
+            if (args.waitMs !== undefined && args.waitMs !== null && Number.isFinite(waitRaw)) {
                 if (waitRaw < 0) throw new Error(`waitMs 不能是负数（收到 ${waitRaw}）`);
                 waitMs = waitRaw;
             }
@@ -372,27 +374,23 @@ const EDITOR_TOOLS = [
             properties: {
                 parent: { type: 'string', description: '父节点 uuid / 路径 / 名字' },
                 name: { type: 'string' },
-                type: { type: 'string', description: '节点类型，如 cc.Node / cc.EmptyNode' },
+                // ⚠️ type 是**节点类型**（不是资源类型）。
+                //    实测 3.8.8 的 create-node 会忽略它 —— 建出来的是普通节点。
+                type: { type: 'string', description: '节点类型（当前 3.8.8 引擎会忽略，仅作预留）' },
                 position: {
                     type: 'object',
-                    description: '初始位置 {x, y, z}',
+                    description: '初始位置 {x, y, z}。⚠️ 引擎的 create-node 会忽略它，本工具在建完后补一次设置，所以实际生效。',
                     properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
                 },
                 components: {
                     type: 'array',
                     items: { type: 'string' },
-                    description: '要挂的组件类型，如 ["cc.UITransform"]',
+                    description: '要挂的组件类型，如 ["cc.UITransform"]。挂失败不影响节点本身（会单独报告）。',
                 },
                 canvasRequired: {
                     type: 'boolean',
                     description: '要求父节点是 Canvas（UI 节点必须）',
                 },
-                type: { type: 'string', description: '可选：资源类型（如 cc.Sprite）' },
-                position: {
-                    type: 'object',
-                    properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
-                },
-                components: { type: 'array', items: { type: 'string' }, description: '要挂的组件类型列表' },
             },
             required: ['parent', 'name'],
         },

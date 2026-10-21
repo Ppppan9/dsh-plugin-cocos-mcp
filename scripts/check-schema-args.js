@@ -56,14 +56,18 @@ module.exports = { extractOpBodies, argsUsed, hasDestructuring, HANDLERS, ROOT }
 if (require.main === module) {
     const src = fs.readFileSync(HANDLERS, 'utf8');
     const ops = extractOpBodies(src);
-    const { EDITOR_TOOLS } = require(path.join(ROOT, 'hub', 'src', 'tools', 'editor-tools.js'));
+    const { EDITOR_TOOLS, GLOBAL_TOOLS } = require(path.join(ROOT, 'hub', 'src', 'tools'));
     console.log(`解析到 ${ops.size} 个 bridge op\n`);
     let bad = 0;
-    for (const t of EDITOR_TOOLS) {
+    for (const t of [...EDITOR_TOOLS, ...GLOBAL_TOOLS]) {
         if (!t.op) continue;
         const body = ops.get(t.op);
         if (!body) {
-            console.log(`  ? ${t.name} → op "${t.op}" 在 handlers.js 里找不到`);
+            // ⚠️ 「找不到」必须**算失败** —— 静默跳过的话，
+            //    一旦 op 改名/删除，这个检查器就悄悄查不到它了，
+            //    还会打印「✅ 全部一致」，等于检查器自己失效了。
+            bad++;
+            console.log(`  ✘ ${t.name} → op "${t.op}" 在 handlers.js 里找不到（可能改名了）`);
             continue;
         }
         if (hasDestructuring(body)) {

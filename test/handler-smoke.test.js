@@ -387,6 +387,37 @@ test('会改场景的 op 都必须让场景树缓存失效', async () => {
 
 // ──────────────────── 导入完成判定（本项目最深的坑） ────────────────────
 
+test('Cocos 的短 uuid 字符集必须包含 + 和 /（真实引擎会产出）', async () => {
+    // ⚠️ 真机实测：引擎会产出含 `+` 和 `/` 的短 uuid
+    //    （"cbguKOUmRESoTWvkSFxlH+"、"d67EOER/ZLSLW84UxP+nMW"）。
+    //    漏掉这两个字符的后果很隐蔽：这种 uuid 匹配不上 → 被当成节点名去场景树里找
+    //    → 节点刚建出来时树还没重建 → **间歇性**报「找不到节点」。
+    const { isUuidLike } = require('../extension/bridge/handlers');
+    assert.ok(isUuidLike('cbguKOUmRESoTWvkSFxlH+'), '含 + 的短 uuid 必须认得');
+    assert.ok(isUuidLike('d67EOER/ZLSLW84UxP+nMW'), '含 / 的短 uuid 必须认得');
+    assert.ok(isUuidLike('62g8xkpqdJbZJCzFSSRkFV'), '普通短 uuid 必须认得');
+    assert.ok(isUuidLike('11111111-2222-3333-4444-555555555555'), '标准 UUID 必须认得');
+    // 反例：不能把明显不是 uuid 的东西放进来（否则会被当成 uuid 直接丢给引擎）
+    assert.ok(!isUuidLike('../../etc/passwd'), '含路径成分的串不能当 uuid');
+    assert.ok(!isUuidLike('not-a-uuid-but-22-chr'), '21 字符的串不能当 uuid');
+    assert.ok(!isUuidLike('short'), '短串不能当 uuid');
+});
+
+test('按 uuid 查节点时**不查场景树**（避开树未重建的竞态）', async () => {
+    // ⚠️ 节点刚建出来时，引擎的场景树可能还没重建 ——
+    //    这时按 uuid 查会「找不到节点」（真机实测，间歇性）。
+    //    uuid 本身就能直接交给引擎，绕开树就没有这个竞态。
+    resetSceneHealth();
+    const ctx = makeCtx();
+    const handlers = createHandlers(ctx);
+    const uuid = 'cbguKOUmRESoTWvkSFxlH+';
+    const r = await handlers['scene.node']({ node: uuid });
+    assert.ok(r && r.uuid === uuid, 'uuid 形态应被直接采用');
+    const treeCalls = ctx.calls.filter((c) => c[0] === 'scene' && c[1] === 'query-node-tree');
+    assert.strictEqual(treeCalls.length, 0, '按 uuid 查时不应去查场景树');
+    resetSceneHealth();
+});
+
 test('asset.isImported：库产物存在才算导入完成', async () => {
     const ctx = makeCtx();
     const handlers = createHandlers(ctx);

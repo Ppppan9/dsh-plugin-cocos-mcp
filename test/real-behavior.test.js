@@ -379,11 +379,52 @@ async function main() {
             );
         }
 
-        // ── 13. 「未导入的场景」必须被**前置拦截**，且不能把频道搞挂 ──
+        // ── 13. 声明了的参数必须**真的生效** ───────────────────
+        // ⚠️ node.create 的 position 之前是**声明了但不生效**的：
+        //    引擎的 create-node 会忽略它（真机实测：建完回读 position 仍是 {0,0,0}），
+        //    而同样的值走 node.transform 就生效。
+        //    现在 bridge 在建完节点后补一次 set-property，所以它真的生效了。
+        //    这条断言防的就是「声明了却静默无效」这一类。
+        console.log('\n▸ 13. 声明了的参数真的生效');
+        {
+            const tree2 = await c.call('scene.tree', {});
+            const root2 = tree2.data && tree2.data.root;
+            if (!root2) {
+                note('读不到场景根节点，跳过参数生效验证');
+            } else {
+                const mk = await c.call('node.create', {
+                    parent: root2,
+                    name: marker + '_POS',
+                    position: { x: 123, y: 456, z: 7 },
+                });
+                const uuid2 = mk.data && mk.data.uuid;
+                if (!uuid2) {
+                    bad('node.create 带 position 失败', mk.isError ? String(mk.text).slice(0, 90) : '没拿到 uuid');
+                } else {
+                    const back = await c.call('scene.node', { node: uuid2 });
+                    const pos = back.data && back.data.dump && back.data.dump.position;
+                    assert(
+                        pos && pos.x === 123 && pos.y === 456 && pos.z === 7,
+                        '★ node.create 的 position 真的生效了（不是声明了但不生效）',
+                        safeJson(
+                            {
+                                pos,
+                                positionError: mk.data && mk.data.positionError,
+                                readError: back.isError ? String(back.text).slice(0, 90) : null,
+                            },
+                            200
+                        )
+                    );
+                    await c.call('node.delete', { node: uuid2, confirm: true });
+                }
+            }
+        }
+
+        // ── 14. 「未导入的场景」必须被**前置拦截**，且不能把频道搞挂 ──
         // 这是本轮最核心的一条：打开一个还没导入完的场景会让**整个 scene 频道中毒**
         // （query-node-tree 永远不返回，后面所有场景操作全挂）。
         // 做法：把一个已导入场景的 library 库产物挪走 → 模拟「还没导入完」。
-        console.log('\n▸ 13. 未导入场景的前置拦截');
+        console.log('\n▸ 14. 未导入场景的前置拦截');
         {
             const projRoot = ed.projectPath;
             const u = await c.call('asset.uuid', { url: 'db://assets/scenes/e2e-scene.scene' });
@@ -428,10 +469,10 @@ async function main() {
             }
         }
 
-        // ── 14. 离线 prefab 编辑器的**写盘路径**（真实文件上跑）──
+        // ── 15. 离线 prefab 编辑器的**写盘路径**（真实文件上跑）──
         // ⚠️ 之前只测过「读」，写盘路径在真机上从没跑过 ——
         //    而写盘恰恰是最容易出事的地方（原子写、.meta 事务、失败零写入）。
-        console.log('\n▸ 14. 离线 prefab 写盘路径（真实文件）');
+        console.log('\n▸ 15. 离线 prefab 写盘路径（真实文件）');
         {
             const prefabPath = path.join(ed.projectPath, 'assets', 'smoke-sample.prefab');
             if (!fs.existsSync(prefabPath)) {

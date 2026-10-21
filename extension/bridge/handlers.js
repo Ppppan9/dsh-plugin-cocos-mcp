@@ -69,7 +69,12 @@ function sceneOpenBudgetMs() {
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 // Cocos 的短 uuid 是 22 字符 base64 风格（字符集 0-9a-zA-Z-_），**不是十六进制**。
 // 之前按 hex 判会把 "62g8xkpqdJbZJCzFSSRkFV" 这类真实 uuid 当成节点名去树里找，必然找不到。
-const SHORT_UUID_RE = /^[A-Za-z0-9_-]{22}$/;
+//
+// ⚠️ 字符集**必须包含 `+` 和 `/`** —— 真实引擎会产出这两种字符
+//    （真机实测："cbguKOUmRESoTWvkSFxlH+"、"d67EOER/ZLSLW84UxP+nMW"）。
+//    漏掉它们的后果很隐蔽：这种 uuid 匹配不上 → 被当成节点名去场景树里找
+//    → 节点刚建出来时树还没重建 → 间歇性报「找不到节点」。
+const SHORT_UUID_RE = /^[A-Za-z0-9_+\/-]{22}$/;
 
 function isUuidLike(s) {
     if (typeof s !== 'string') return false;
@@ -350,6 +355,12 @@ function invalidateTree() {
  */
 async function resolveNode(ctx, ref, opts = {}) {
     if (!ref) throw new Error('缺少 node 参数');
+
+    // ⚠️ **uuid 形态直接用，不查场景树** ——
+    //    节点刚建出来时，引擎的场景树可能还没重建（真机实测：建完立刻
+    //    按 uuid 查会「找不到节点」，间歇性发生）。
+    //    而 uuid 本身就能直接交给引擎，绕开树就没有这个竞态。
+    if (opts.trustUuid !== false && isUuidLike(ref)) return String(ref);
 
     const flat = await getSceneTree(ctx);
     const hits = matchNodes(flat, ref);
@@ -898,6 +909,48 @@ function createHandlers(ctx) {
                     canvasRequired: args.canvasRequired,
                 },
             ]);
+            // ⚠️ **引擎的 create-node 会忽略 position**（真机实测：
+            //    建完回读 dump.position 仍是 {0,0,0}；而同样的 position
+            //    走 node.transform / set-property 是**生效**的）。
+            //    所以这里在建完之后补一次 set-property ——
+            //    否则工具声明了 position、模型也传了、却静默不生效。
+            let positionError = null;
+            if (args.position) {
+                const want = {
+                    x: num(args.position.x),
+                    y: num(args.position.y),
+                    z: num(args.position.z || 0),
+                };
+                try {
+                    await send('scene', 'set-property', [
+                        { uuid, path: 'position', dump: inferDump(args.position) },
+                    ]);
+                } catch (e) {
+                    positionError = `设置初始位置失败：${e.message}`;
+                }
+                if (!positionError) {
+                    // ⚠️ set-property **返回时引擎可能还没真正应用**（真机实测：
+                    //    紧接着回读有时还是 {0,0,0}，有时已经对了 —— 竞态）。
+                    //    所以回读校验 + 短暂重试，让「position 生效」变成确定行为，
+                    //    而不是看运气。
+                    const deadline = Date.now() + 800;
+                    let applied = false;
+                    while (Date.now() < deadline) {
+                        const dump = await send('scene', 'query-node', [uuid]).catch(() => null);
+                        const p = dump && dump.position && dump.position.value ? dump.position.value : dump && dump.position;
+                        if (p && num(p.x) === want.x && num(p.y) === want.y && num(p.z) === want.z) {
+                            applied = true;
+                            break;
+                        }
+                        await new Promise((r) => setTimeout(r, 50));
+                    }
+                    if (!applied) {
+                        positionError =
+                            '已请求设置初始位置，但回读校验未通过（引擎可能忽略了它）——' +
+                            '可以之后用 node.transform 再设一次。';
+                    }
+                }
+            }
             const created = [];
             const failed = [];
             for (const comp of args.components || []) {
@@ -912,7 +965,9 @@ function createHandlers(ctx) {
                     failed.push({ component: comp, reason: e.message });
                 }
             }
-            return { uuid, name: args.name, components: created, componentErrors: failed };
+            const out = { uuid, name: args.name, components: created, componentErrors: failed };
+            if (positionError) out.positionError = positionError;
+            return out;
         },
 
         'node.delete': async (args) => {

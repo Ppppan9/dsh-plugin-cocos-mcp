@@ -404,6 +404,22 @@ test('工具 schema 必须覆盖 Bridge 侧真正支持的参数', () => {
     assert.deepStrictEqual(problems, [], '这些参数 Bridge 支持但 schema 没声明：\n  - ' + problems.join('\n  - '));
 });
 
+test('工具 schema 里没有重复 key（重复会被后写的静默覆盖）', () => {
+    // ⚠️ JS 对象字面量里同一个 key 写两次，**后写的覆盖先写的** ——
+    //    运行时对象里重复信息已经丢了，从对象上看不出来。
+    //    真实踩过：node.create 的 properties 里 type/position/components 各写了两次，
+    //    新加的描述全被丢弃，模型看到的仍是旧的（而且是错的那条）。
+    //    而且这类问题**不会被任何基于「key 集合」的比对发现**。
+    const { findDuplicateKeys } = require('../scripts/check-dup-schema-keys');
+    const problems = [];
+    for (const f of ['hub/src/tools/editor-tools.js', 'hub/src/tools/global-tools.js']) {
+        for (const d of findDuplicateKeys(read(f))) {
+            problems.push(`${f}:${d.second} "${d.key}" 重复（第 ${d.first} 行已写过）`);
+        }
+    }
+    assert.deepStrictEqual(problems, [], 'schema 里有重复 key：\n  - ' + problems.join('\n  - '));
+});
+
 test('README 的工具清单与实际工具一致', () => {
     const all = [...EDITOR_TOOLS, ...GLOBAL_TOOLS];
     // README 里写的工具数量
