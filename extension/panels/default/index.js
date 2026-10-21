@@ -34,6 +34,15 @@ module.exports = {
         <button @click="restart">重启 Bridge</button>
     </div>
 
+    <div class="block" v-if="hubInfo">
+        <div class="block-title">Hub 位置</div>
+        <div class="row"><label>路径</label><code class="path">{{ hubInfo.hub || '(未找到)' }}</code></div>
+        <p class="hint" v-if="!hubInfo.found">
+            找不到 hub/bin.js —— 请重新运行 <code>node scripts/install-extension.js &lt;项目路径&gt;</code>，
+            或设置环境变量 <code>COCOS_MCP_HUB</code> 指向它。
+        </p>
+    </div>
+
     <div class="block">
         <div class="block-title">接入 AI 客户端</div>
         <p class="hint">把下面这段加到 MCP 客户端配置里（Claude Code / Cursor / Codex 均适用）：</p>
@@ -72,6 +81,7 @@ button { padding: 4px 12px; cursor: pointer; }
     data() {
         return {
             status: null,
+            hubInfo: null,
             clientConfig: '',
             copied: false,
             messageCount: 0,
@@ -80,6 +90,14 @@ button { padding: 4px 12px; cursor: pointer; }
     },
 
     methods: {
+        /** 面板要显示 hub 路径 —— 用户才知道配置为什么连不上。 */
+        async loadHubInfo() {
+            try {
+                this.hubInfo = await Editor.Message.request('cocos-mcp', 'getHubInfo');
+            } catch (e) {
+                this.hubInfo = { hub: null, found: false };
+            }
+        },
         /**
          * ⚠️ 必须放在 methods 里 —— Vue 2 的选项合并只认 methods 对象的成员，
          *    顶层的自定义选项不会挂到实例上，`this._stopTimer` 会是 undefined。
@@ -114,6 +132,7 @@ button { padding: 4px 12px; cursor: pointer; }
     },
 
     ready() {
+        this.loadHubInfo();
         this.refresh();
         this._timer = setInterval(() => this.refresh(), 5000);
     },

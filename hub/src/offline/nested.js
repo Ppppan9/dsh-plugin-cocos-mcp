@@ -331,7 +331,15 @@ function syncNestedRoots(ctx, nodeIndex) {
   for (const inst of targets) {
     const normalized = normalizeOverridePaths(ctx, inst);
     const reordered = reorderOverrides(ctx, inst);
-    const toi = ensureTargetOverride(ctx, inst, inst.fileId ? [inst.fileId] : []);
+    // ⚠️ 要用该 instance 下各条 override **实际使用的链**，
+    //    不是实例边界链 [inst.fileId] —— 否则链永远不相等，
+    //    每调一次 sync-nested-roots 就多挂一条指向错目标的 TargetOverrideInfo。
+    const chains = [];
+    for (const ov of inst.overrides) {
+        const key = JSON.stringify(ov.localID || []);
+        if (!chains.some((c) => JSON.stringify(c) === key)) chains.push(ov.localID || []);
+    }
+    const toi = ensureTargetOverride(ctx, inst, chains[0] || (inst.fileId ? [inst.fileId] : []));
     results.push({
       instanceIndex: inst.index,
       fileId: inst.fileId,

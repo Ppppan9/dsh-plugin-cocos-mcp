@@ -147,8 +147,27 @@ function importerForPath(filePath) {
       return 'audio-clip';
     case '.mp4':
       return 'video-clip';
-    default:
+    case '.anim':
+      return 'animation-clip';
+    case '.ttf':
+    case '.otf':
+      return 'font';
+    case '.plist':
+      return 'sprite-atlas';
+    case '.csv':
+    case '.txt':
+    case '.md':
+      return 'text';
+    case '.fbx':
+      return 'fbx';
+    case '.prefab':
       return 'prefab';
+    case '.scene':
+      return 'scene';
+    default:
+      // ⚠️ 未知扩展名不要默认 prefab —— 给 .ts 写 importer:"prefab"
+      //    会让 Cocos 用 prefab 导入器解析脚本，脚本彻底无法编译。
+      return 'text';
   }
 }
 
@@ -200,6 +219,17 @@ function planMetaWrite(filePath, options) {
   }
 
   const opts = options || {};
+  if (opts.uuid && prevUuid && opts.uuid !== prevUuid) {
+    // ⚠️ 显式指定了**不同的** uuid —— 这会改掉资产主键，
+    //    所有引用该资产的地方（prefab / 场景 / 脚本 @property）全部断链。
+    //    直接拒绝，而不是默默改。
+    throw new Error(
+      `拒绝改写 ${path.basename(filePath)}.meta 的 uuid：` +
+      `现有 "${prevUuid}"，请求 "${opts.uuid}"。` +
+      'uuid 是资产主键，改了会让所有引用断链。' +
+      '（确实要改请先手动改所有引用，或删掉 .meta 让 Cocos 重新生成。）'
+    );
+  }
   const uuid = opts.uuid || prevUuid || deterministicUuid(`meta:${path.resolve(filePath)}`);
   const importer = opts.importer || prevImporter || importerForPath(filePath);
 

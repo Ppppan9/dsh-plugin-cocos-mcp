@@ -10,6 +10,7 @@
  */
 
 const fs = require('node:fs');
+const { isInsideAnyRoot } = require('../util/path-guard');
 const path = require('node:path');
 
 const {
@@ -123,8 +124,10 @@ const OP_DEFS = {
             '按选择器批量设置属性。\n' +
             'selector: byComponent（按组件类型匹配）/ byNamePrefix（按名字前缀）/ byNameRegex（按名字正则）。\n' +
             'target: **写入目标** —— "node" 写节点，或 "component:cc.Label" 写组件。\n' +
-            'match: 匹配条件；byComponent 时填组件类型名（如 "cc.Label"），缺省时从 target 推导。\n' +
-            '例：{"selector":"byComponent","target":"component:cc.Label","match":"cc.Label","property":"string","value":"确定"}',
+            'match: 匹配条件。byComponent 时填组件类型名（如 "cc.Label"），缺省时从 target 推导；' +
+            'byNamePrefix / byNameRegex 时**必填**（留空会匹配全部节点，已拒绝）。\n' +
+            '例：{"selector":"byComponent","target":"component:cc.Label","match":"cc.Label","property":"_string","value":"确定"}。\n' +
+            '⚠️ property 用的是 **.prefab 序列化后的字段名**（带 _ 前缀，如 _string / _fontSize），不是编辑器里显示的名字。',
     },
 };
 
@@ -938,6 +941,7 @@ const HANDLERS = {
 
         let applied = 0;
         const skipped = [];
+        const propSegs = splitPath(op.property);
         for (const idx of targets) {
             if (isComponentTarget) {
                 const comps = nodeComponents(ctx, idx);
@@ -946,9 +950,27 @@ const HANDLERS = {
                     skipped.push({ node: displayName(ctx, idx), reason: `没有组件 ${targetCompType}` });
                     continue;
                 }
-                setPath(comp.element, splitPath(op.property), op.value);
+                // ⚠️ 写前校验属性存在 ——
+                //    序列化字段名带 _ 前缀（_string / _fontSize），
+                //    写成 "string" 会**新建**一个引擎不认的字段，
+                //    报 applied:1 但真字段没变（典型的「报告成功但零效果」）。
+                if (propSegs.length && !(propSegs[0] in comp.element)) {
+                    skipped.push({
+                        node: displayName(ctx, idx),
+                        reason: `组件 ${targetCompType} 上没有属性 "${op.property}"（序列化字段名带 _ 前缀，如 _string）`,
+                    });
+                    continue;
+                }
+                setPath(comp.element, propSegs, op.value);
             } else {
-                setPath(ctx.data[idx], splitPath(op.property), op.value);
+                if (propSegs.length && !(propSegs[0] in ctx.data[idx])) {
+                    skipped.push({
+                        node: displayName(ctx, idx),
+                        reason: `节点上没有属性 "${op.property}"`,
+                    });
+                    continue;
+                }
+                setPath(ctx.data[idx], propSegs, op.value);
             }
             applied++;
         }
@@ -985,10 +1007,9 @@ function assertOpPathAllowed(ctx, target, label) {
         );
     }
     const resolved = path.resolve(target);
-    for (const root of roots) {
-        const rel = path.relative(path.resolve(root), resolved);
-        if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return;
-    }
+    // ⚠️ 必须 realpath 感知 —— 只做词法比较时，
+    //    项目内一个 `link -> /Outside` 软链就能越界写（实测可改写项目外文件）。
+    if (isInsideAnyRoot(resolved, roots)) return;
     throw new Error(
         `${label} "${resolved}" 不在允许的目录范围内（允许：${roots.map((r) => path.resolve(r)).join('、')}）。已拒绝。`
     );

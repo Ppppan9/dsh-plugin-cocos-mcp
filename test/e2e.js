@@ -249,9 +249,16 @@ async function main() {
         section('4. 真实写入闭环（建 Canvas → 建节点 → 挂组件 → 设属性 → 读回 → 删除）');
         // Cocos 3.8.8 默认模板是 3D 场景（Scene / Main Light / Main Camera），
         // 没有 Canvas。所以先建一个 Canvas 当 UI 根，再在它下面建测试节点。
+        //
+        // ⚠️ 根节点名**不能写死成 "Scene"** —— 编辑器当前打开的场景可能是
+        //    上一轮测试留下的任意场景（根节点名不同），写死会让整个 4 段测试
+        //    以「找不到节点 Scene」全线崩溃。这里动态读真实根节点名。
+        const tree0 = await client.callTool('scene.tree');
+        const rootName = tree0.data && tree0.data.root;
+        assert(!!rootName, '读到当前场景的根节点名', rootName || '读取失败');
         const canvasName = `E2ECanvas_${Date.now()}`;
         const canvas = await client.callTool('node.create', {
-            parent: 'Scene',
+            parent: rootName,
             name: canvasName,
             components: ['cc.Canvas', 'cc.UITransform'],
         });
@@ -260,7 +267,7 @@ async function main() {
 
         const marker = `E2E_${Date.now()}`;
         const created = await client.callTool('node.create', {
-            parent: canvasUuid || 'Scene',
+            parent: canvasUuid || rootName,
             name: marker,
             components: ['cc.Label'],
         });
@@ -322,8 +329,8 @@ async function main() {
         const countBefore = beforeTx.data ? beforeTx.data.count : 0;
         const badTx = await client.callTool('scene.transaction', {
             ops: [
-                { op: 'node.create', args: { parent: 'Scene', name: '__TX_OK__' } },
-                { op: 'node.create', args: { parent: 'Scene', name: '__TX_BAD__' } },
+                { op: 'node.create', args: { parent: rootName, name: '__TX_OK__' } },
+                { op: 'node.create', args: { parent: rootName, name: '__TX_BAD__' } },
                 { op: 'component.set', args: { node: '__NO_SUCH_NODE__', component: 'cc.Label', property: 'string', value: 'x' } },
             ],
         });

@@ -675,3 +675,184 @@ test('写回保留原缩进风格', () => {
     const text = fs.readFileSync(f, 'utf8');
     assert.ok(text.includes('\n    '), '应保留 4 空格缩进');
 });
+
+// ────────────────────────────── 本轮补齐的覆盖缺口 ──────────────────────────────
+
+test('★ bulk-set：match 缺省必须报错（不能退化成全量改写）', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    writeJson(f, makePrefab());
+    const before = fs.readFileSync(f, 'utf8');
+    const r = offline.editPrefab({
+        filePath: f,
+        ops: [{ op: 'bulk-set', selector: 'byNamePrefix', target: 'node', property: '_active', value: false }],
+    });
+    assert.strictEqual(r.ok, false, '缺 match 时应报错');
+    assert.match(r.error, /match/, '错误信息要说明是 match 的问题');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, '失败时磁盘必须不变');
+});
+
+test('★ bulk-set：属性不存在时计入 skipped，不能报告成功', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    writeJson(f, makePrefab());
+    const r = offline.editPrefab({
+        filePath: f,
+        ops: [{
+            op: 'bulk-set',
+            selector: 'byComponent',
+            target: 'component:cc.Label',
+            match: 'cc.Label',
+            property: 'string',       // ← 序列化字段名是 _string，写 string 会凭空建字段
+            value: 'X',
+        }],
+    });
+    assert.ok(r.ok, r.error);
+    const step = r.data.steps[0].result;
+    assert.strictEqual(step.applied, 0, '★ 不该报告 applied');
+    assert.ok(step.skipped > 0, '应计入 skipped');
+    const after = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const label = after.find((e) => e.__type__ === 'cc.Label');
+    assert.strictEqual(label.string, undefined, '★ 不该凭空造出 string 字段');
+    assert.strictEqual(label._string, 'hello', '原字段不受影响');
+});
+
+test('★ bulk-set：属性名写对时能改到组件上', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    writeJson(f, makePrefab());
+    const r = offline.editPrefab({
+        filePath: f,
+        ops: [{
+            op: 'bulk-set',
+            selector: 'byComponent',
+            target: 'component:cc.Label',
+            match: 'cc.Label',
+            property: '_string',
+            value: 'BULK',
+        }],
+    });
+    assert.ok(r.ok, r.error);
+    const after = JSON.parse(fs.readFileSync(f, 'utf8'));
+    assert.ok(after.some((e) => e.__type__ === 'cc.Label' && e._string === 'BULK'), '组件字段应被改到');
+});
+
+test('★ assertOpPathAllowed：未配置 / 显式空 / 软链 三种语义', () => {
+    const { assertOpPathAllowed } = require('../ops');
+    const dir = tmpdir();
+    const outside = tmpdir();
+    const inside = path.join(dir, 'ok.txt');
+    fs.writeFileSync(inside, 'x');
+
+    // 1) 未配置（null）→ 放行（独立 CLI 用法）
+    assert.doesNotThrow(() => assertOpPathAllowed({}, inside, 't'));
+
+    // 2) 显式空数组 → 拒绝一切
+    assert.throws(() => assertOpPathAllowed({ allowedRoots: [] }, inside, 't'), /白名单为空/);
+
+    // 3) 非空 → 按 realpath 判断
+    assert.doesNotThrow(() => assertOpPathAllowed({ allowedRoots: [dir] }, inside, 't'));
+    assert.throws(() => assertOpPathAllowed({ allowedRoots: [dir] }, path.join(outside, 'x.txt'), 't'), /不在允许的目录范围/);
+
+    // 4) 符号链接逃逸 → 必须被拒
+    const link = path.join(dir, 'link');
+    try {
+        fs.symlinkSync(outside, link, 'dir');
+    } catch (_) {
+        return;   // 环境不支持软链就跳过这条
+    }
+    assert.throws(
+        () => assertOpPathAllowed({ allowedRoots: [dir] }, path.join(link, 'victim.txt'), 't'),
+        /不在允许的目录范围/,
+        '★ 软链指向项目外时必须被拒绝'
+    );
+});
+
+test('★ planMetaWrite：保留已有 .meta 的全部字段', () => {
+    const { planMetaWrite } = require('../write');
+    const dir = tmpdir();
+    const target = path.join(dir, 'hero.png');
+    fs.writeFileSync(target, 'x');
+    fs.writeFileSync(`${target}.meta`, JSON.stringify({
+        ver: '1.0.0',
+        importer: 'texture',
+        imported: true,
+        uuid: 'KEEP-UUID',
+        files: ['/hero.png'],
+        subMetas: { abc: { importer: 'sprite-frame' } },
+        userData: { keep: 'me' },
+    }, null, 2) + '\n');
+
+    const plan = planMetaWrite(target, {});
+    assert.strictEqual(plan.uuid, 'KEEP-UUID', 'uuid 必须保留');
+    const merged = JSON.parse(plan.content);
+    assert.strictEqual(merged.importer, 'texture', 'importer 必须保留');
+    assert.deepStrictEqual(merged.files, ['/hero.png'], 'files 必须保留');
+    assert.deepStrictEqual(merged.subMetas, { abc: { importer: 'sprite-frame' } }, '★ subMetas 必须保留（SpriteFrame 引用靠它）');
+    assert.deepStrictEqual(merged.userData, { keep: 'me' }, 'userData 必须保留');
+    assert.strictEqual(merged.ver, '1.0.0', 'ver 必须保留');
+});
+
+test('★ planMetaWrite：显式指定不同 uuid 时必须拒绝（改 uuid 会断掉所有引用）', () => {
+    const { planMetaWrite } = require('../write');
+    const dir = tmpdir();
+    const target = path.join(dir, 'hero.png');
+    fs.writeFileSync(target, 'x');
+    fs.writeFileSync(`${target}.meta`, JSON.stringify({ ver: '1.0.0', importer: 'texture', uuid: 'OLD-UUID' }, null, 2) + '\n');
+    assert.throws(() => planMetaWrite(target, { uuid: 'NEW-UUID' }), /拒绝改写|uuid/);
+});
+
+test('importerForPath 按扩展名推导，不是一律 prefab', () => {
+    const { importerForPath } = require('../write');
+    assert.strictEqual(importerForPath('/a/x.ts'), 'typescript');
+    assert.strictEqual(importerForPath('/a/x.anim'), 'animation-clip');
+    assert.strictEqual(importerForPath('/a/x.prefab'), 'prefab');
+    assert.strictEqual(importerForPath('/a/x.json'), 'json');
+    assert.notStrictEqual(importerForPath('/a/x.unknown'), 'prefab', '★ 未知扩展名不能默认 prefab');
+});
+
+test('★ ensureTargetOverride：localID 链不同时不复用（不能把 override 挂到错目标）', () => {
+    const { ensureTargetOverride } = require('../nested');
+    // 构造一个最小 ctx：data 是数组，prefabInfos / instances 是 Map
+    const data = [];
+    const ctx = {
+        data,
+        prefabInfos: new Map(),
+        instances: new Map(),
+    };
+    // 宿主的 PrefabInfo（第 0 个）与它挂着的 TargetOverrideInfo（第 1 个）
+    const prefabInfoIndex = 0;
+    const toiIndex = 1;
+    data.push({ __type__: 'cc.PrefabInfo', targetOverrides: [{ __id__: toiIndex }] });
+    data.push({ __type__: 'cc.TargetOverrideInfo', targetInfo: { __id__: 2 }, localID: ['OLD-CHAIN'] });
+    data.push({ __type__: 'cc.TargetInfo', localID: ['OLD-CHAIN'] });
+    ctx.prefabInfos.set(prefabInfoIndex, {
+        index: prefabInfoIndex,
+        element: data[prefabInfoIndex],
+        fileId: 'INST',
+        instanceIndex: 5,
+        targetOverrideIndices: [toiIndex],
+    });
+    // ⚠️ instance.prefabInfoIndex 必须指向宿主的 PrefabInfo ——
+    //    ensureTargetOverride 靠它找到「挂在谁身上」，缺了就直接返回 null。
+    const instance = {
+        index: 5,
+        fileId: 'INST',
+        prefabInfoIndex: prefabInfoIndex,
+        element: { propertyOverrides: [] },
+        overrides: [],
+    };
+    ctx.instances.set(5, instance);
+
+    // 链不同 → 必须新建一条，而不是复用那条 OLD-CHAIN
+    ensureTargetOverride(ctx, instance, ['INST', 'COMP']);
+    const tois = data[prefabInfoIndex].targetOverrides;
+    assert.strictEqual(tois.length, 2, '★ 链不同应新建一条 TargetOverrideInfo');
+    const last = data[tois[1].__id__];
+    assert.deepStrictEqual(last.localID, ['INST', 'COMP'], '新链必须与本次 override 的链一致');
+
+    // 链相同 → 复用，不新增
+    const before = data[prefabInfoIndex].targetOverrides.length;
+    ensureTargetOverride(ctx, instance, ['INST', 'COMP']);
+    assert.strictEqual(data[prefabInfoIndex].targetOverrides.length, before, '链相同应复用而不是新建');
+});

@@ -3,6 +3,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { realpathBestEffort, isInsideAnyRoot } = require('../util/path-guard');
 
 /**
  * 全局工具（不需要编辑器在线）
@@ -60,34 +61,6 @@ function projectRoots(ctx) {
 }
 
 /**
- * 求「尽可能真实」的路径：把已存在的部分逐段 realpath 掉，
- * 不存在的尾部按字面拼上。
- *
- * 为什么需要：path.resolve 只做**词法**折叠，符号链接原样保留。
- * 项目里放一个 `assets_link -> ~/.ssh` 的软链，词法判断会认为
- * `<项目>/assets_link/id_rsa` 在项目内 → 实际读的是项目外。
- */
-function realpathBestEffort(target) {
-    const abs = path.resolve(target);
-    const parts = abs.split(path.sep);
-    let cur = parts[0] === '' ? path.sep : parts[0];
-    const trailing = [];
-    for (let i = 1; i < parts.length; i++) {
-        const next = path.join(cur, parts[i]);
-        try {
-            cur = fs.realpathSync(next);
-        } catch (_) {
-            // 这一段不存在（或没权限），后面的按字面拼
-            cur = next;
-            trailing.length = 0;
-            for (let j = i + 1; j < parts.length; j++) trailing.push(parts[j]);
-            break;
-        }
-    }
-    return trailing.length ? path.join(cur, ...trailing) : cur;
-}
-
-/**
  * 断言 target 落在某个项目根目录内。
  * 防的是「模型给一个 /etc/passwd 或 ~/.ssh/id_rsa，让工具去读/写」，
  * 以及通过**符号链接**绕过。
@@ -101,14 +74,9 @@ function assertInsideProject(ctx, target, label = '文件路径') {
             `请先用 cocos_prefab_* 之外的方式确认项目路径，或先打开 Cocos Creator（扩展会注册项目目录）。`
         );
     }
-    // 词法判断 + 真实路径判断，两者都要过
-    const realTarget = realpathBestEffort(resolved);
-    for (const root of roots) {
-        const realRoot = realpathBestEffort(root);
-        const rel = path.relative(realRoot, realTarget);
-        if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
-            return resolved;
-        }
+    // 词法判断 + 真实路径判断，两者都要过（realpath 感知，防符号链接逃逸）
+    if (isInsideAnyRoot(resolved, roots)) {
+        return resolved;
     }
     throw new Error(
         `${label} "${resolved}" 不在任何一个已注册的 Cocos 项目目录内（允许的项目根：${roots.join('、')}）。已拒绝。` +
@@ -277,11 +245,18 @@ const GLOBAL_TOOLS = [
         handler: async (args, ctx) => {
             const offline = requireOffline();
             const opsJsonPath = assertInsideProject(ctx, args.opsJsonPath, 'ops 文件路径');
-            return offline.batchPrefab({
+            // ⚠️ batch 的目标文件与 op 里的路径都来自**不可信的 JSON 文件** ——
+            //    必须和 edit 一样接上 op 级护栏，否则项目 A 里的 ops.json
+            //    能改写项目 B（甚至项目外）的文件。
+            const res = offline.batchPrefab({
                 opsJsonPath,
                 dryRun: !!args.dryRun,
                 allowedRoots: projectRoots(ctx),
             });
+            if (res && res.ok && res.data && Array.isArray(res.data.ops)) {
+                assertOpPathsInsideProject(ctx, res.data.ops, 'op 内路径');
+            }
+            return res;
         },
         safety: 'write',
     }),
@@ -303,6 +278,7 @@ const GLOBAL_TOOLS = [
                 count: ops.length,
                 ops: ops.map((o) => ({
                     name: o.name,
+                    domain: o.domain,
                     required: o.required,
                     optional: o.optional,
                     description: o.description,
@@ -329,6 +305,7 @@ const GLOBAL_TOOLS = [
                 count: ops.length,
                 ops: ops.map((o) => ({
                     name: o.name,
+                    domain: o.domain,
                     required: o.required,
                     optional: o.optional,
                     description: o.description,

@@ -401,27 +401,40 @@ test('cocos_prefab_ops / cocos_anim_ops 的返回与实际 op 集合一致', asy
     // ⚠️ 不能只断言 pr.count === listOps('prefab').length ——
     //    工具 handler 内部就是 listOps('prefab')，两边是同一个值，恒真。
     //    要断言的是「两个域加起来 == 全部」以及「每个 op 的 domain 与来源一致」。
-    const all = off.listOps();
-    assert.strictEqual(pr.count + an.count, all.length, '两个域的 op 数之和应等于总数');
-    assert.strictEqual(pr.count, all.filter((o) => o.domain === 'prefab').length, 'prefab 域数量不符');
-    assert.strictEqual(an.count, all.filter((o) => o.domain === 'anim').length, 'anim 域数量不符');
-    for (const o of all) {
-        assert.ok(o.domain === 'prefab' || o.domain === 'anim', `op ${o.name} 的 domain 非法：${o.domain}`);
-    }
+    // ⚠️ 不要断言「prefab + anim === 全部」——
+    //    listOps() 的实现本身就是「建一个数组、每项打 domain 标签、再按 domain 过滤」，
+    //    那条等式是**构造上的恒等式**，写出来只是自我安慰。
+    //    真正有效的是**与真源交叉校验**：工具返回的 op 集合必须恰好等于
+    //    ops.js 的 OP_DEFS / anim.js 的 ANIM_OP_DEFS 的键集合。
+    const { OP_DEFS: PREFAB_DEFS } = require('../hub/src/offline/ops');
+    const { ANIM_OP_DEFS: ANIM_DEFS } = require('../hub/src/offline/anim');
+    assert.deepStrictEqual(
+        pr.ops.map((o) => o.name).sort(),
+        Object.keys(PREFAB_DEFS).sort(),
+        'cocos_prefab_ops 返回的 op 集合必须与 OP_DEFS 完全一致'
+    );
+    assert.deepStrictEqual(
+        an.ops.map((o) => o.name).sort(),
+        Object.keys(ANIM_DEFS).sort(),
+        'cocos_anim_ops 返回的 op 集合必须与 ANIM_OP_DEFS 完全一致'
+    );
+    // 每个 op 的 domain 标记必须与它来自哪个表一致
+    for (const o of pr.ops) assert.strictEqual(o.domain, 'prefab', `op ${o.name} 的 domain 应为 prefab`);
+    for (const o of an.ops) assert.strictEqual(o.domain, 'anim', `op ${o.name} 的 domain 应为 anim`);
     // 每个声明的 op 都必须有执行器（否则是「注册了但调不到」）
-    const { OP_DEFS, HANDLERS } = require('../hub/src/offline/ops');
-    const { ANIM_OP_DEFS, ANIM_HANDLERS } = require('../hub/src/offline/anim');
-    for (const name of Object.keys(OP_DEFS)) {
+    const { HANDLERS } = require('../hub/src/offline/ops');
+    const { ANIM_HANDLERS } = require('../hub/src/offline/anim');
+    for (const name of Object.keys(PREFAB_DEFS)) {
         assert.ok(HANDLERS[name], `prefab op "${name}" 没有执行器`);
     }
-    for (const name of Object.keys(ANIM_OP_DEFS)) {
+    for (const name of Object.keys(ANIM_DEFS)) {
         assert.ok(ANIM_HANDLERS[name], `anim op "${name}" 没有执行器`);
     }
     for (const name of Object.keys(HANDLERS)) {
-        assert.ok(OP_DEFS[name], `执行器 "${name}" 没有在 op 表里声明`);
+        assert.ok(PREFAB_DEFS[name], `执行器 "${name}" 没有在 op 表里声明`);
     }
     for (const name of Object.keys(ANIM_HANDLERS)) {
-        assert.ok(ANIM_OP_DEFS[name], `anim 执行器 "${name}" 没有在 op 表里声明`);
+        assert.ok(ANIM_DEFS[name], `anim 执行器 "${name}" 没有在 op 表里声明`);
     }
     // 两个工具不能互相串味
     assert.ok(pr.ops.every((o) => !off.listOps('anim').some((a) => a.name === o.name)), 'prefab 工具混入了 anim op');

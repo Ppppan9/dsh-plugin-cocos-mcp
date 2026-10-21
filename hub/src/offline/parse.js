@@ -425,20 +425,27 @@ function loadAnim(filePath) {
     const channels = [];
     if (Array.isArray(el._channels)) {
       el._channels.forEach((c, ci) => {
-        const ch = isPlainObject(c) ? c : null;
+        // cc.VectorTrack 的 _channels 是**引用数组** ——
+        //   真实路径在被引用的 CurveChannel 元素上，
+        //   track 元素与引用本身都没有 path。
+        const resolved = isPlainObject(c) && typeof c.__id__ === 'number' ? data[c.__id__] : c;
+        const ch = isPlainObject(resolved) ? resolved : null;
         channels.push({
           index: ci,
           channel: ch,
-          // 路径在 track 元素上，不在 channel 引用上
+          ref: c,
           path: channelPath(el) || (ch ? channelPath(ch) : ''),
           element: el,
         });
       });
     } else if (isPlainObject(el._channel)) {
+      const resolved = typeof el._channel.__id__ === 'number' ? data[el._channel.__id__] : el._channel;
+      const ch = isPlainObject(resolved) ? resolved : null;
       channels.push({
         index: 0,
-        channel: el._channel,
-        path: channelPath(el) || channelPath(el._channel),
+        channel: ch,
+        ref: el._channel,
+        path: channelPath(el) || (ch ? channelPath(ch) : ''),
         element: el,
       });
     } else if (typeof el.path === 'string' || typeof el._path === 'string') {

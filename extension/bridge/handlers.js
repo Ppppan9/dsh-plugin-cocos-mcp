@@ -1,8 +1,18 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 
 const { verify } = require('./messages');
+
+/**
+ * 编辑器消息的默认超时（毫秒）。
+ *
+ * ⚠️ 必须有：实测一次 scene:open-scene 失败（资源还没导入完）之后，
+ *    **整个 scene 频道会卡住** —— bridge/ping 正常，但 query-node-tree 永远不返回。
+ *    没有超时的话调用方只能干等到客户端超时，且错误信息毫无信息量。
+ */
+const DEFAULT_MESSAGE_TIMEOUT_MS = 30000;
 
 /**
  * 编辑器侧操作层
@@ -113,13 +123,121 @@ function matchNodes(flat, ref) {
 const TREE_TTL_MS = 2000;
 const treeCache = new Map(); // ctx 无关，全进程一份（编辑器主进程只有一个）
 
+/**
+ * 场景频道健康状态
+ * ---------------------------------------------------------------------------
+ * ⚠️ 这是本项目被咬得最狠的一个坑：
+ *    Cocos 的 `scene:open-scene` 在某些情况下**既不 resolve 也不 reject**
+ *    （引擎内部只打一行 "SceneFacadeManager.openScene timeout"）。
+ *    之后**整个 scene 频道从此不再回应** —— query-node-tree / query-node
+ *    全部永远不返回，但 bridge/ping 一切正常。
+ *
+ *    没有这道闸门时，调用方的体验是：
+ *      scene.open  → 干等 135 秒 → 报「超时」
+ *      scene.tree  → 干等 30 秒 → 报「超时」
+ *      scene.save  → 干等 30 秒 → 报「超时」
+ *    每一条都是「超时」，完全看不出真正的原因是「频道已经死了，要重启编辑器」。
+ *
+ * 这道闸门把「沉默地干等」变成「立刻失败 + 可行动的提示」。
+ */
+const SCENE_DEAD_HINT =
+    'Cocos 的场景频道已经卡死（引擎侧 open-scene 挂死后，整个 scene 频道不再回应）。' +
+    '所有场景操作都会失败。请重启 Cocos Creator（或在扩展面板点「重启 Bridge」），' +
+    '期间可以改用离线 prefab/animation 编辑器。';
+
+/** @type {{dead: boolean, checkedAt: number, failures: number, lastProbeAt: number}} */
+const sceneHealth = { dead: false, checkedAt: 0, failures: 0, lastProbeAt: 0 };
+/** 健康检查结果的缓存时间（毫秒）—— 太频繁会拖慢每一次场景调用。 */
+const SCENE_HEALTH_TTL_MS = 8000;
+/** 健康检查本身的超时 —— 必须远小于正常操作的超时，才能起到「快速失败」的作用。 */
+const SCENE_HEALTH_TIMEOUT_MS = 8000;
+/** 连续失败多少次才判定频道已死（避免编辑器忙的时候误判）。 */
+const SCENE_HEALTH_MAX_FAILURES = 2;
+/** 判定已死后，多久允许再探一次（给自愈留机会）。 */
+const SCENE_DEAD_REPROBE_MS = 30000;
+
+/**
+ * 发一条带超时的消息，并在结束后清掉定时器。
+ * ⚠️ 没有超时的话，频道卡死时调用会**永久挂起**（既不 resolve 也不 reject）。
+ */
+async function sendWithTimeout(ctx, channel, message, args = [], timeoutMs = DEFAULT_MESSAGE_TIMEOUT_MS, hint = '') {
+    let timer = null;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            const err = new Error(
+                `编辑器消息 "${channel}:${message}" 超时（${timeoutMs}ms 未返回）。` + (hint || '')
+            );
+            err.code = 'EDITOR_MESSAGE_TIMEOUT';
+            reject(err);
+        }, timeoutMs);
+    });
+    try {
+        return await Promise.race([ctx.msg(channel, message, ...args), timeout]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+/**
+ * 确认场景频道还活着；死了就立刻抛错，不让调用方干等。
+ *
+ * ⚠️ 两处必须小心，否则闸门本身会变成新的故障源：
+ *   1. **不能一次失败就判死** —— 编辑器正忙（比如在构建、在导入大批资源）时，
+ *      query-is-ready 可能几秒不回。一次失败就永久判死，会把用户的场景工具
+ *      全部锁死，而且再也回不来。所以要连续失败 2 次才判死。
+ *   2. **判死后要允许自愈** —— 频道未必真的死了（引擎侧可能只是暂时卡住）。
+ *      每 30 秒给一次机会重新探活，探活成功就恢复。
+ */
+async function assertSceneChannelAlive(ctx) {
+    const now = Date.now();
+    if (sceneHealth.dead) {
+        // 判死了也定期给一次自愈机会
+        if (now - sceneHealth.lastProbeAt < SCENE_DEAD_REPROBE_MS) {
+            const err = new Error(`场景频道不可用：${SCENE_DEAD_HINT}`);
+            err.code = 'SCENE_CHANNEL_DEAD';
+            throw err;
+        }
+        sceneHealth.lastProbeAt = now;
+    } else if (now - sceneHealth.checkedAt < SCENE_HEALTH_TTL_MS) {
+        return;
+    }
+    sceneHealth.checkedAt = now;
+
+    try {
+        await sendWithTimeout(ctx, 'scene', 'query-is-ready', [], SCENE_HEALTH_TIMEOUT_MS);
+        // 探活成功 → 频道是好的（可能之前只是暂时卡住）
+        sceneHealth.dead = false;
+        sceneHealth.failures = 0;
+    } catch (e) {
+        sceneHealth.failures += 1;
+        if (sceneHealth.failures < SCENE_HEALTH_MAX_FAILURES) {
+            // 第一次失败：还不敢判死，但也不能让调用方干等 —— 照常抛超时错误
+            const err = new Error(
+                `场景频道响应异常（健康检查失败：${e.message}）。` +
+                '编辑器可能正忙，稍后重试；如果持续失败，重启 Cocos Creator。'
+            );
+            err.code = 'SCENE_CHANNEL_UNHEALTHY';
+            throw err;
+        }
+        sceneHealth.dead = true;
+        sceneHealth.lastProbeAt = now;
+        const err = new Error(`场景频道不可用：${SCENE_DEAD_HINT}（健康检查失败：${e.message}）`);
+        err.code = 'SCENE_CHANNEL_DEAD';
+        throw err;
+    }
+}
+
 async function getSceneTree(ctx) {
     const hit = treeCache.get('tree');
     const now = Date.now();
     if (hit && now - hit.ts < TREE_TTL_MS) {
         return hit.flat;
     }
-    const tree = await ctx.msg('scene', 'query-node-tree');
+    // ⚠️ 频道卡死时这条消息**永不返回** —— 必须有超时，还要先做健康检查。
+    //    （之前的注释写着「也要超时」，但代码里根本没有超时 —— 频道一挂，
+    //     这里就永久挂起，调用方连报错都拿不到。）
+    await assertSceneChannelAlive(ctx);
+    const tree = await sendWithTimeout(ctx, 'scene', 'query-node-tree', [], DEFAULT_MESSAGE_TIMEOUT_MS);
     const flat = slimNode(tree);
     treeCache.set('tree', { ts: now, flat });
     return flat;
@@ -251,9 +369,65 @@ function createHandlers(ctx) {
         }
     }
 
+    /**
+     * 资源是否**已经导入完成**。
+     *
+     * ⚠️ 这是本项目踩过最深的一个坑，答案很朴素：
+     *    渲染进程打开场景时去取 `import://<uuid>.json`，
+     *    那份数据的落盘位置就是 `<项目>/library/<uuid前2位>/<uuid>.json`。
+     *    **文件存在 = 导入完成 = 场景可打开。**
+     *
+     * 为什么不用别的信号：
+     *   - `asset-db:query-asset-info` 在资源刚创建时**立刻**就返回非空（实测 0.5s），
+     *     `imported` 字段也是 true —— 但那只是 asset-db 记了账，渲染进程还没导入完。
+     *   - `query-asset-info` 返回 null 也不代表资源不存在（可能只是没导入完）。
+     * 所以唯一可靠的就是**直接看库文件在不在**。
+     *
+     * 有了它就能**彻底避免**「打开一个还没导入的场景 → 失败 → 整个 scene 频道卡死」。
+     */
+    async function isImported(target) {
+        // target 可以是 uuid 也可以是 db:// 资源 URL ——
+        // scene.open 传的是 uuid，asset.isImported / scene.create 传的是 URL。
+        // ⚠️ 这里必须两种都支持：早期版本只认 URL，scene.open 传 uuid 进来
+        //    查不到信息 → 一律判为「未导入」→ 打开场景 100% 失败。
+        if (!target || typeof target !== 'string') {
+            return { imported: false, uuid: null, reason: '没有指定资源（url 或 uuid）' };
+        }
+        let uuid = null;
+        if (isUuidLike(target)) {
+            uuid = target;
+        } else {
+            try {
+                const info = await send('asset-db', 'query-asset-info', [target]);
+                if (info && info.uuid) uuid = info.uuid;
+            } catch (_) {
+                return { imported: false, uuid: null, reason: '查不到资源信息（可能还没进库）' };
+            }
+        }
+        if (!uuid) return { imported: false, uuid: null, reason: '资源还没有 uuid' };
+        const projectRoot = ctx.projectPath || '';
+        if (!projectRoot) return { imported: false, uuid, reason: '拿不到工程目录，无法检查库文件' };
+        const libFile = path.join(projectRoot, 'library', String(uuid).slice(0, 2), `${uuid}.json`);
+        let exists = false;
+        try {
+            exists = fs.existsSync(libFile);
+        } catch (_) {
+            exists = false;
+        }
+        return {
+            imported: exists,
+            uuid,
+            libraryFile: libFile,
+            reason: exists ? null : '库产物还没生成（引擎仍在导入）',
+        };
+    }
+
     /** 取节点的父节点 uuid（根节点返回场景根自身）。 */
     async function getParentUuid(ctx, uuid) {
-        const tree = await ctx.msg('scene', 'query-node-tree');
+        // ⚠️ 这条消息同样会挂死 —— 频道卡死时它既不 resolve 也不 reject。
+        //    必须走带超时 + 健康检查的路径，不能直接 ctx.msg。
+        await assertSceneChannelAlive(ctx);
+        const tree = await sendWithTimeout(ctx, 'scene', 'query-node-tree', [], DEFAULT_MESSAGE_TIMEOUT_MS);
         const flat = slimNode(tree);
         const self = flat.find((n) => n.uuid === uuid);
         if (!self) return uuid;
@@ -290,25 +464,21 @@ function createHandlers(ctx) {
             err.code = 'MESSAGE_NOT_AVAILABLE';
             throw err;
         }
-        const timeoutMs = opts.timeoutMs;
-        if (!timeoutMs) {
-            return ctx.msg(channel, message, ...args);
+        // ⚠️ 发消息**之前**先确认频道还活着。
+        //   实测：一次 scene:open-scene 挂死之后，整个 scene 频道就不再回应，
+        //   但 bridge/ping 照常成功 —— 从外面看「编辑器还连着」，实际上所有场景
+        //   工具都会一直干等到超时。没有这道闸门，调用方拿到的全是
+        //   「超时」这种没信息量的错误，完全看不出「频道已经死了，该重启编辑器」。
+        if (channel === 'scene' && !opts.skipHealthCheck) {
+            await assertSceneChannelAlive(ctx);
         }
-        let timer = null;
-        const timeout = new Promise((_, reject) => {
-            timer = setTimeout(() => {
-                const err = new Error(
-                    `编辑器消息 "${channel}:${message}" 超时（${timeoutMs}ms 未返回）。` + (opts.timeoutHint || '')
-                );
-                err.code = 'EDITOR_MESSAGE_TIMEOUT';
-                reject(err);
-            }, timeoutMs);
-        });
-        try {
-            return await Promise.race([ctx.msg(channel, message, ...args), timeout]);
-        } finally {
-            if (timer) clearTimeout(timer);
-        }
+        // ⚠️ **所有**编辑器消息都要有超时兜底。
+        //   实测：一次 scene:open-scene 失败（资源还没导入完）之后，
+        //   **整个 scene 频道就卡住了** —— bridge/ping 正常，但 query-node-tree
+        //   永远不返回。没有超时的话，调用方只能干等到客户端超时（60s），
+        //   而且错误信息毫无信息量。
+        const timeoutMs = opts.timeoutMs || DEFAULT_MESSAGE_TIMEOUT_MS;
+        return await sendWithTimeout(ctx, channel, message, args, timeoutMs, opts.timeoutHint);
     }
 
     const ops = {
@@ -336,7 +506,7 @@ function createHandlers(ctx) {
                     timeoutHint: '该编辑器消息可能不回话（Cocos 某些消息失败时不 resolve 也不 reject）。',
                 });
             }
-            return await ctx.msg(args.channel, args.message, ...list);
+            return await send(args.channel, args.message, list);
         },
 
         /**
@@ -442,24 +612,87 @@ function createHandlers(ctx) {
             if (!info) {
                 throw new Error(`找不到场景资源 "${args.uuid}"。先用 asset.uuid 把 db://assets/xxx.scene 路径转成 uuid。`);
             }
-            await send(
-                'scene',
-                'open-scene',
-                [args.uuid],
-                {
-                    timeoutMs: 90000,
-                    timeoutHint:
-                        '常见原因：场景资源刚创建、引擎还在导入（渲染进程取 import://<uuid>.json 失败，' +
-                        '编辑器内部会打 “SceneFacadeManager.openScene timeout”）。等几秒后重试，' +
-                        '或先用 asset.reimport 触发导入。',
+            // ⚠️ **打开前必须先确认已导入**。
+            //    实测：打开一个还没导入完的场景 → 渲染进程取 import://<uuid>.json 失败 →
+            //    编辑器内部打 "SceneFacadeManager.openScene timeout" →
+            //    **整个 scene 频道从此卡死**（query-node-tree 永远不返回），
+            //    后面所有碰场景的工具全部挂住。
+            //    这里提前拦下来，给出可行动的错误，而不是把编辑器搞挂。
+            const imp = await isImported(args.uuid);
+            if (!imp.imported) {
+                throw new Error(
+                    `场景 "${args.uuid}" 还没导入完成（${imp.reason}），现在打开会导致场景操作全部卡死。` +
+                    '请等几秒后重试，或先用 asset.reimport 触发导入。'
+                );
+            }
+
+            // 已导入但仍然失败 → 重试（引擎侧偶发失败）
+            let lastErr = null;
+            // ⚠️ 总预算必须小于 hub 侧 scene.open 的 timeoutMs（150s），
+            //    否则客户端会先超时，Bridge 还在重试 —— 白白挂住。
+            //
+            // ⚠️ 2 次 × 45s 太短了 —— 实测引擎在某些状态下打开场景要 **50 秒以上**
+            //    （日志里能看到 "auto refresh because script compiled or scene changed"，
+            //    资产库在做自动刷新时引擎会等它）。
+            //    45s 的超时会把「慢但最终成功」误判成失败；而失败之后的重试
+            //    又是在引擎半开着的状态下继续折腾，才真的把 scene 频道搞死。
+            //    放宽到 65s：一次尝试就能覆盖绝大多数慢场景，
+            //    两次尝试的最坏预算 132s，仍小于 hub 侧 150s 的客户端超时。
+            const OPEN_ATTEMPTS = 2;
+            const OPEN_TIMEOUT_MS = 65000;
+            for (let attempt = 1; attempt <= OPEN_ATTEMPTS; attempt++) {
+                try {
+                    await send(
+                        'scene',
+                        'open-scene',
+                        [args.uuid],
+                        {
+                            timeoutMs: OPEN_TIMEOUT_MS,
+                            timeoutHint:
+                                '常见原因：场景资源刚创建、引擎还在导入（渲染进程取 import://<uuid>.json 失败，' +
+                                '编辑器内部会打 “SceneFacadeManager.openScene timeout”）。',
+                        }
+                    );
+                    return { opened: args.uuid, name: info.name || null, attempts: attempt };
+                } catch (e) {
+                    lastErr = e;
+                    if (attempt < OPEN_ATTEMPTS) {
+                        // ⚠️ 这个模块里没有 log —— 上一版写成了 log(...) 直接 ReferenceError，
+                        //    把「打开失败重试」变成了「打开必崩」。
+                        console.log(`[cocos-mcp] 打开场景第 ${attempt} 次失败，等 2s 后重试：${e.message}`);
+                        await new Promise((r) => setTimeout(r, 2000));
+                    }
                 }
+            }
+            // 最后失败：分清「资源没准备好」和「频道已经死了」——
+            // 这两种情况的处置方式完全不同，不能只给一句「稍后再试」。
+            let channelState = 'alive';
+            try {
+                // 强制做一次健康检查（跳过 TTL 缓存），确认频道还活着没有
+                sceneHealth.checkedAt = 0;
+                await assertSceneChannelAlive(ctx);
+            } catch (_) {
+                channelState = 'dead';
+            }
+            if (channelState === 'dead') {
+                const err = new Error(
+                    `打开场景 "${args.uuid}" 失败（${lastErr && lastErr.message}），` +
+                    `并且场景频道随后不再回应 —— ${SCENE_DEAD_HINT}`
+                );
+                err.code = 'SCENE_CHANNEL_DEAD';
+                throw err;
+            }
+            throw new Error(
+                `打开场景 "${args.uuid}" 连续 ${OPEN_ATTEMPTS} 次失败：${lastErr && lastErr.message}` +
+                '（场景资源可能还没导入完 —— 先用 asset.reimport 触发导入，稍后再试。' +
+                '场景频道目前仍然正常，所以可以重试。）'
             );
-            return { opened: args.uuid, name: info.name || null };
         },
 
         'scene.save': async () => {
             invalidateTree();
-            const r = await send('scene', 'save-scene', []);
+            // 保存可能要等场景结算（刚打开的大场景会花十几秒）→ 给更长的超时
+            const r = await send('scene', 'save-scene', [], { timeoutMs: 90000 });
             return { saved: true, result: r === undefined ? null : r };
         },
 
@@ -471,7 +704,7 @@ function createHandlers(ctx) {
 
         'scene.reload': async () => {
             invalidateTree();
-            await send('scene', 'soft-reload', []);
+            await send('scene', 'soft-reload', [], { timeoutMs: 90000 });
             return { reloaded: true };
         },
 
@@ -600,15 +833,28 @@ function createHandlers(ctx) {
             // paste 会新建节点 → 场景树缓存必须失效，
             // 否则紧接着用新节点名调用其它工具会命中 2 秒内的旧树，报「找不到节点」。
             invalidateTree();
-            const uuid = await resolveNode(ctx, args.node);
-            if (args.action === 'copy') return { copied: await send('scene', 'copy-node', [uuid]) };
-            if (args.action === 'cut') {
-                // ⚠️ cut-node 的 parent 要传**该节点的父节点**，不是它自己
-                const parentUuid = await getParentUuid(ctx, uuid);
-                return { cut: await send('scene', 'cut-node', [{ parent: parentUuid, uuids: uuid }]) };
+            // ⚠️ paste 的 source 在**剪贴板里**，可能已经被 cut 删掉了 ——
+            //    所以不能按场景节点去解析它，否则「剪切 → 粘贴」直接失败。
+            if (args.action === 'paste') {
+                const target = await resolveNode(ctx, args.target);
+                const pasted = await send('scene', 'paste-node', [{ target, uuids: args.node }]);
+                return { pasted };
             }
-            const target = await resolveNode(ctx, args.target);
-            return { pasted: await send('scene', 'paste-node', [{ target, uuids: uuid }]) };
+            const uuid = await resolveNode(ctx, args.node);
+            if (args.action === 'copy') {
+                return { copied: await send('scene', 'copy-node', [uuid]), clipboardKey: uuid };
+            }
+            if (args.action === 'cut') {
+                // ⚠️ **Cocos 3.8.8 的 scene:cut-node 只准备剪贴板，不会把节点移出层级** ——
+                //    实测 parent 传「父节点 uuid / 节点自己 uuid / 节点路径」三种形态，
+                //    节点在场景树里都原封不动（官方描述是 "Cut node"，与行为不符）。
+                //    所以「剪切」要自己实现成两步：copy-node（备剪贴板）+ remove-node（真删）。
+                //    实测「复制 → 删除 → 粘贴」可行：粘贴会生成新 uuid 的节点。
+                await send('scene', 'copy-node', [uuid]);
+                await send('scene', 'remove-node', [{ uuid }]);
+                return { cut: true, removed: uuid, clipboardKey: uuid };
+            }
+            throw new Error(`未知的剪贴板动作 "${args.action}"，可用：copy / cut / paste`);
         },
 
         // ── 组件 ──
@@ -627,15 +873,50 @@ function createHandlers(ctx) {
             // 返回「成功」但什么都没摘，静默失败最难查。
             const dump = await send('scene', 'query-node', [uuid]);
             const comps = Array.isArray(dump.__comps__) ? dump.__comps__ : [];
-            const has = comps.some((c) => readCompType(c) === args.component);
-            if (!has) {
+            const idx = comps.findIndex((c) => readCompType(c) === args.component);
+            if (idx < 0) {
                 throw new Error(
                     `节点 "${args.node}" 上没有组件 "${args.component}"，没有可摘的。` +
                     `现有组件：${comps.map((c) => readCompType(c)).join('、') || '(无)'}`
                 );
             }
-            await send('scene', 'remove-component', [{ uuid, component: args.component }]);
-            return { uuid, component: args.component, removed: true };
+            // ⚠️ RemoveComponentOptions.uuid 是**组件的 uuid**，不是节点的 uuid！
+            //    官方 d.ts 写得很清楚：
+            //      export interface RemoveComponentOptions { uuid: string; // 组件的uuid
+            //                                                  // 无用参数
+            //                                                  // component: string; }
+            //    之前传的是节点 uuid → Cocos 找不到该组件 → 只在日志里打一句
+            //    "Remove Component failed: xxx does not exist"，而我们照样返回「已删除」= 假成功。
+            // raw dump 里组件的 uuid 是 IProperty 包装 {value, type, ...}，要解包
+            const compUuid = comps[idx] && comps[idx].value
+                ? readValue(comps[idx].value.uuid)
+                : null;
+            if (!compUuid) {
+                throw new Error(
+                    `读不到组件 "${args.component}" 的 uuid，无法移除。` +
+                    '（节点 dump 里该组件没有 value.uuid 字段。）'
+                );
+            }
+            await send('scene', 'remove-component', [{ uuid: compUuid }]);
+
+            // 操作后回读校验：真的摘掉了吗？
+            const after = await send('scene', 'query-node', [uuid]).catch(() => null);
+            if (!after) {
+                // 节点本身已经不在了 —— 无法回读校验，如实说明而不是谎报成功
+                throw new Error(
+                    `移除组件 "${args.component}" 后读不回节点 "${uuid}"（节点可能已被删除），无法确认结果。`
+                );
+            }
+            const still = (Array.isArray(after.__comps__) ? after.__comps__ : []).some(
+                (c) => readCompType(c) === args.component
+            );
+            if (still) {
+                throw new Error(
+                    `移除组件 "${args.component}" 后回读发现它仍在节点上 —— 引擎没有真的摘掉。` +
+                    '（这种情况要当作失败处理，不能报告成功。）'
+                );
+            }
+            return { uuid, component: args.component, removed: true, componentUuid: compUuid };
         },
 
         'component.list': async (args) => {
@@ -693,17 +974,56 @@ function createHandlers(ctx) {
             return { count: Array.isArray(list) ? list.length : 0, assets: list };
         },
 
+        /**
+         * 查资源是否已导入完成（本地库文件判定，最可靠）。
+         * 刚创建的资源在导入完成前，打开它会**毒死整个 scene 频道** ——
+         * 想知道能不能开，先查这个。
+         */
+        'asset.isImported': async (args) => {
+            // url 与 uuid 二选一：url 必须限定在 db://assets/ 内（防止越权读盘），
+            // uuid 走 isUuidLike 白名单，不含路径成分，天然安全。
+            const hasUrl = typeof args.url === 'string' && args.url !== '';
+            const hasUuid = typeof args.uuid === 'string' && args.uuid !== '';
+            if (!hasUrl && !hasUuid) {
+                throw new Error('asset.isImported 缺少必填参数：url 或 uuid');
+            }
+            if (hasUrl) {
+                requireAssetUrl(args.url);
+                return await isImported(args.url);
+            }
+            if (!isUuidLike(args.uuid)) {
+                throw new Error(`asset.isImported 的 uuid 格式不合法："${args.uuid}"`);
+            }
+            return await isImported(args.uuid);
+        },
+
         'asset.info': async (args) => {
             req(args, ['url'], 'asset.info');
             const info = await send('asset-db', 'query-asset-info', args.dataKeys ? [args.url, args.dataKeys] : [args.url]);
-            if (!info) throw new Error(`资源不存在：${args.url}`);
+            if (!info) {
+                // ⚠️ 实测：资源**刚创建、引擎还在导入**时，query-asset-info 也返回空 ——
+                //    这时候报「资源不存在」是误导（它存在，只是还没导入完）。
+                throw new Error(
+                    `读不到资源信息：${args.url}。` +
+                    '可能原因：① 资源不存在；② 资源刚创建、引擎还在导入（等几秒再试）。'
+                );
+            }
             return info;
         },
 
         'asset.create': async (args) => {
             req(args, ['url'], 'asset.create');
             requireAssetUrl(args.url);
-            const r = await send('asset-db', 'create-asset', [args.url, args.content === undefined ? null : args.content]);
+            // asset-db:create-asset 的第三个参数是 AssetOperationOption，
+            // overwrite 决定同名资源已存在时是覆盖还是报错。
+            const options = args.overwrite ? { overwrite: true } : undefined;
+            const r = await send(
+                'asset-db',
+                'create-asset',
+                options
+                    ? [args.url, args.content === undefined ? null : args.content, options]
+                    : [args.url, args.content === undefined ? null : args.content]
+            );
             return { created: args.url, info: r };
         },
 
@@ -964,6 +1284,17 @@ function unwrapDump(node) {
 
 module.exports = {
     createHandlers,
+    /**
+     * 重置场景频道健康状态。
+     * 仅供测试使用 —— 生产里状态本来就该跟着编辑器进程走
+     * （频道死了就是死了，重启编辑器/重启 Bridge 会重新加载模块，状态自然清零）。
+     */
+    resetSceneHealth() {
+        sceneHealth.dead = false;
+        sceneHealth.checkedAt = 0;
+        sceneHealth.failures = 0;
+        sceneHealth.lastProbeAt = 0;
+    },
     slimNode,
     resolveNode,
     inferDump,

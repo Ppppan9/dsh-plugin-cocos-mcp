@@ -107,7 +107,7 @@ Claude Code / Cursor / Codex
 
 <!-- TOOLS:START -->
 
-## 工具清单（69 个）
+## 工具清单（70 个）
 
 ### 全局工具（与编辑器实例无关，始终无前缀）
 
@@ -127,7 +127,7 @@ Claude Code / Cursor / Codex
 
 | 域 | 工具 |
 |---|---|
-| asset | `asset.copy` `asset.create` `asset.delete` `asset.dependencies` `asset.info` `asset.move` `asset.path` `asset.query` `asset.refresh` `asset.reimport` `asset.save` `asset.url` `asset.users` `asset.uuid` |
+| asset | `asset.copy` `asset.create` `asset.delete` `asset.dependencies` `asset.info` `asset.isImported` `asset.move` `asset.path` `asset.query` `asset.refresh` `asset.reimport` `asset.save` `asset.url` `asset.users` `asset.uuid` |
 | build | `build.platforms` `build.start` `build.status` |
 | component | `component.add` `component.call` `component.list` `component.remove` `component.set` |
 | editor | `editor.console.clear` `editor.info` `editor.logs` |
@@ -226,9 +226,13 @@ npm run test:smoke    # 全工具冒烟（67 次调用，覆盖全部 59 个工�
 
 | 层 | 脚本 | 覆盖 | 当前 |
 |---|---|---|---|
-| 单测 | `hub/test/` + `hub/src/offline/test/` | 离线 prefab/anim 读写、事务 undo 日志 | **34/34** |
+| 单测 | `hub/test/` + `hub/src/offline/test/` + `test/consistency.test.js` + `test/handler-smoke.test.js` | 离线 prefab/anim 读写、事务 undo 日志、文档/清单一致性、**逐个调用全部 Bridge op** | **90/90** |
 | 端到端 | `test/e2e.js` | MCP 握手 → 工具面 → 真实读取 → **真实写入闭环** → **事务失败真回滚** → 安全护栏 → Resources → 离线能力 → 路径护栏 → 多编辑器前缀隔离 | **59/59** |
-| 全工具冒烟 | `test/tool-smoke.js` | **每一个**工具都真跑一遍 + 工具面静态自检（描述/schema/安全标记） | **67/67** |
+| 全工具冒烟 | `test/tool-smoke.js` | **每一个**工具都真跑一遍 + 工具面静态自检 | **82/82** |
+| 真机行为 | `test/real-behavior.test.js` | 把「代码看不出对错、必须真机才能定论」的条目逐条跑清楚：剪切→粘贴闭环、组件真被摘掉、越界写被拦、20 并发、事务回滚 | **33/33** |
+
+> ⏱ 后两层要连真机 Cocos Creator，**耗时以分钟计** —— Cocos 的场景导入本身就要几十秒
+> （新建场景 → 导入 → 打开 ≈ 40-70s，这是引擎行为不是我们慢）。
 
 > 为什么要单独做「全工具冒烟」：现存开源实现最大的问题就是**工具注册成功但一调用就报错**。
 > 声明 ≠ 能用。逐个真跑一遍，才知道工具面是真是假。

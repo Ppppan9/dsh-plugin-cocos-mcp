@@ -75,17 +75,27 @@ function channelPath(channel) {
  */
 function getKeyframes(channel, data) {
   if (!isPlainObject(channel)) return null;
-  const containers = [channel.curve, channel._curve, channel];
+  // ⚠️ **先解引用，再在解引用后的元素上取容器**。
+  //   之前容器列表是用**未解引用**的 channel 算的（channel.curve / channel._curve / channel），
+  //   于是当 channel 本身是 {"__id__":N} 时，解引用后拿到的 CurveChannel 元素
+  //   它的 curve 子容器**永远不会被检查** → 引用型通道解析不到关键帧。
+  let el = channel;
+  if (typeof channel.__id__ === 'number' && Array.isArray(data)) {
+    el = data[channel.__id__];
+    if (!isPlainObject(el)) return null;
+  }
+  const containers = [el.curve, el._curve, el];
   for (const c of containers) {
     if (!isPlainObject(c)) continue;
-    let target = c;
-    // 解引用 {"__id__": N}
-    if (typeof c.__id__ === 'number' && Array.isArray(data)) {
-      target = data[c.__id__];
-      if (!isPlainObject(target)) continue;
-    }
     for (const key of ['data', 'keyframes', '_data', '_keyframes', 'points']) {
-      if (Array.isArray(target[key])) return target[key];
+      if (Array.isArray(c[key])) return c[key];
+    }
+    // cc.Curve 的另一种布局：data 是对象，内含 paths / times+values
+    if (isPlainObject(c.data)) {
+      if (Array.isArray(c.data.paths)) return c.data.paths;
+      if (Array.isArray(c.data.times) && Array.isArray(c.data.values)) {
+        return c.data.times.map((t, i) => ({ time: t, value: c.data.values[i] }));
+      }
     }
   }
   return null;

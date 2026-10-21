@@ -265,7 +265,10 @@ function editPrefab(args) {
         // ⚠️ filePath 本身也要过护栏 ——
         //    batchPrefab 的目标文件来自 ops JSON 文件，hub 只校验了那个 JSON 的位置，
         //    结果项目 A 里的 ops.json 可以改写项目 B 的文件。
-        if (Array.isArray(args.allowedRoots) && args.allowedRoots.length) {
+        // ⚠️ 不能加 `.length` 判断 —— 那会把「显式空数组」当成「没配置」，
+        //    导致同一个 [] 在 filePath 层放行、在 op 层拒绝，语义相反。
+        //    null / [] / 非空 三种语义由 assertOpPathAllowed 自己区分。
+        if (Array.isArray(args.allowedRoots)) {
             assertOpPathAllowed(ctxForGuard(args.allowedRoots), path.resolve(filePath), 'prefab 路径');
         }
         const originalText = readTextFile(filePath);

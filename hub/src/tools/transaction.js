@@ -54,24 +54,45 @@ function findCompIndex(dump, compType) {
 }
 
 /** 节点 dump → 可恢复的精简状态。 */
+/**
+ * 节点 dump → 可恢复的精简状态。
+ *
+ * ⚠️ 真机 `scene:query-node` 的返回形状（实测 Cocos Creator 3.8.8）：
+ *   { active, locked, name, position, rotation, scale, mobility, layer,
+ *     uuid, parent, children, __type__, __comps__ }
+ * 其中：
+ *   - `position` / `scale` / `rotation` 都是 **IProperty 包装**
+ *     `{name, value, default, type, ...}`，真值在 `.value` 里；
+ *   - `rotation` 的 `.value` 是**欧拉角 {x,y,z}（度）**，不是四元数；
+ *   - `parent` 是 IProperty，父节点 uuid 在 `.value.uuid`；
+ *   - `children` 是数组。
+ *
+ * 之前直接读 `dump.position` / `dump.parent.uuid`，
+ * 拿到的是「整个 IProperty 对象」和 undefined ——
+ * 结果是事务的 undo **静默不恢复 transform**、node.move 的 undo 把节点丢到场景根。
+ */
 async function captureNode(ctx, nodeRef) {
     const r = await ctx.call('scene.node', { node: nodeRef });
     const dump = r.dump || {};
+    // IProperty 解包：{value, type, ...} → 真实值
+    const unwrap = (p) => (p && typeof p === 'object' && 'value' in p ? p.value : p);
     const comps = (dump.__comps__ || []).map((c) => {
         const props = {};
         for (const [k, v] of Object.entries(c.value || {})) {
-            if (SCALAR(v)) props[k] = v;
+            const uv = unwrap(v);
+            if (SCALAR(uv)) props[k] = uv;
         }
         return { type: c.type, props };
     });
+    const parentVal = unwrap(dump.parent);
     return {
         uuid: r.uuid,
         name: r.name,
         dump,   // 供 findCompIndex 查旧值
-        parentUuid: dump.parent && dump.parent.uuid ? dump.parent.uuid : null,
-        position: dump.position || null,
-        scale: dump.scale || null,
-        rotation: dump.rotation || null,
+        parentUuid: parentVal && typeof parentVal === 'object' ? parentVal.uuid || null : null,
+        position: unwrap(dump.position) || null,
+        scale: unwrap(dump.scale) || null,
+        rotation: unwrap(dump.rotation) || null,   // 欧拉角 {x,y,z}（度）
         active: dump.active !== false,
         childCount: Array.isArray(dump.children) ? dump.children.length : 0,
         components: comps,
@@ -98,7 +119,17 @@ async function planUndo(op, ctx) {
                     // 兜底：响应没回来时 createdUuid 是 null，但编辑器可能已经建好了。
                     // 按「父节点 + 名字」在场景树里找出来删掉。
                     const found = await findNodeByNameUnder(ctx, args.parent, args.name);
-                    if (found) await ctx.call('node.delete', { node: found, confirm: true });
+                    if (found) {
+                        await ctx.call('node.delete', { node: found, confirm: true });
+                    } else {
+                        // ⚠️ 放弃兜底**必须报错** ——
+                        //    静默返回会被上层当成「回滚成功」，模型据此认为场景干净，
+                        //    然后继续在脏状态上叠加改动。
+                        throw new Error(
+                            `兜底清理未执行：父节点「${args.parent}」无法定位，` +
+                            `场景里可能残留名为「${args.name}」的节点。`
+                        );
+                    }
                 },
                 capture: (r) => {
                     createdUuid = r && r.uuid;
@@ -114,7 +145,14 @@ async function planUndo(op, ctx) {
                         return;
                     }
                     const found = await findNodeByNameUnder(ctx, args.parent, args.name);
-                    if (found) await ctx.call('node.delete', { node: found, confirm: true });
+                    if (found) {
+                        await ctx.call('node.delete', { node: found, confirm: true });
+                    } else {
+                        throw new Error(
+                            `兜底清理未执行：父节点「${args.parent}」无法定位，` +
+                            `场景里可能残留名为「${args.name}」的副本。`
+                        );
+                    }
                 },
                 capture: (r) => {
                     newUuids = (r && r.newUuids) || [];
@@ -135,6 +173,11 @@ async function planUndo(op, ctx) {
                     const root = await sceneRootUuid(ctx);
                     if (root) {
                         await ctx.call('node.move', { node: args.node, parent: root });
+                    } else {
+                        throw new Error(
+                            '无法把节点移回原位：场景根节点取不到。' +
+                            '（层级变更可能已生效，场景状态不确定。）'
+                        );
                     }
                 },
             };
@@ -244,12 +287,18 @@ async function planUndo(op, ctx) {
                         if (before.position) await ctx.call('node.transform', { node: newUuid, position: before.position });
                         if (before.scale) await ctx.call('node.transform', { node: newUuid, scale: before.scale });
                         if (before.rotation) {
-                            // ⚠️ dump 里的 rotation 是**四元数** {x,y,z,w}，
-                            //    而 node.transform 的 rotation 是**角度**（数字）。
-                            //    直接把四元数塞进去，bridge 会当成 object 类型下发，
-                            //    引擎不会反序列化成 Quat → 旋转恢复静默失败。
-                            const deg = quatToDegrees(before.rotation);
-                            if (deg !== null) await ctx.call('node.transform', { node: newUuid, rotation: deg });
+                            // ⚠️ dump 里的 rotation 是**欧拉角 {x,y,z}（度）**，不是四元数
+                            //    （真机实测）。node.transform 的 rotation 接受数字（绕 Z）
+                            //    或欧拉角对象，原样下发即可。
+                            const rot = before.rotation;
+                            if (typeof rot === 'object' && Number.isFinite(Number(rot.x))) {
+                                await ctx.call('node.transform', {
+                                    node: newUuid,
+                                    rotation: { x: Number(rot.x), y: Number(rot.y || 0), z: Number(rot.z || 0) },
+                                });
+                            } else if (Number.isFinite(Number(rot))) {
+                                await ctx.call('node.transform', { node: newUuid, rotation: Number(rot) });
+                            }
                         }
                         if (before.active === false) await ctx.call('node.active', { node: newUuid, active: false });
                         for (const c of before.components) {
@@ -404,24 +453,17 @@ async function sceneRootUuid(ctx) {
     return ctx.__rootUuid;
 }
 
-/** 四元数 → 绕 Z 轴角度（度）。桥的 node.transform 只接受数字角度。 */
-function quatToDegrees(q) {
-    if (!q || typeof q !== 'object') return null;
-    const z = Number(q.z);
-    const w = Number(q.w);
-    if (!Number.isFinite(z) || !Number.isFinite(w)) return null;
-    const siny = 2 * (w * z);
-    const cosy = 1 - 2 * z * z;
-    const deg = (Math.atan2(siny, cosy) * 180) / Math.PI;
-    return Number.isFinite(deg) ? deg : null;
-}
-
 /** 按「父节点 + 名字」在场景树里找节点（兜底清理用）。 */
 async function findNodeByNameUnder(ctx, parentRef, name) {
     try {
         const tree = await ctx.call('scene.tree', {});
         const nodes = (tree && tree.nodes) || [];
-        const parent = nodes.find((n) => n.uuid === parentRef || n.path === parentRef || n.name === parentRef);
+        // 父节点按**名字**匹配时，同名就必须放弃 ——
+        // UI prefab 里两个 "Canvas" 极常见，取第一个会删错节点。
+        const byName = nodes.filter((n) => n.name === parentRef);
+        let parent = nodes.find((n) => n.uuid === parentRef || n.path === parentRef);
+        if (!parent && byName.length === 1) parent = byName[0];
+        if (!parent && byName.length > 1) return null;   // 同名父节点 → 不确定，不动
         // ⚠️ 父节点解析不出来时**不能**退化成「全场景同名匹配」——
         //    那会删掉一个无关的同名节点（资产静默损坏）。
         //    解析不出来就放弃兜底，让上层如实报告「回滚状态未知」。

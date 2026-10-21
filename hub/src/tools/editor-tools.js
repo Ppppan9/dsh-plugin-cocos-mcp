@@ -111,8 +111,35 @@ const EDITOR_TOOLS = [
         handler: async (args, ctx) => {
             const dir = args.path || 'db://assets';
             const url = `${dir.replace(/\/$/, '')}/${args.name}.scene`;
-            await ctx.call('asset.create', { url, content: readSceneTemplate() });
-            return { url, created: true, hint: '用 scene.open 打开它；导入可能需要几秒' };
+            // overwrite: true —— 同名场景已存在时覆盖它。
+            // 不覆盖的话 create-asset 会失败，而「上一轮残留的同名场景」是常态。
+            await ctx.call('asset.create', { url, content: readSceneTemplate(), overwrite: true });
+            // ⚠️ 必须等引擎把场景**导入完**再返回 ——
+            //    场景刚创建就打开会失败，而一次失败就会让整个 scene 频道卡死
+            //    （query-node-tree 永远不返回，所有场景工具全挂）。
+            //    判据用 bridge 的 asset.isImported（查本地库文件是否存在）——
+            //    asset-info / imported 字段都会**提前**变真，不能用。
+            const deadline = Date.now() + (args.waitMs === undefined ? 90000 : Number(args.waitMs));
+            let ready = false;
+            let lastReason = null;
+            while (Date.now() < deadline) {
+                const st = await ctx.call('asset.isImported', { url }).catch(() => null);
+                if (st && st.imported) {
+                    ready = true;
+                    break;
+                }
+                if (st && st.reason) lastReason = st.reason;
+                await new Promise((r) => setTimeout(r, 400));
+            }
+            return {
+                url,
+                created: true,
+                imported: ready,
+                hint: ready
+                    ? '场景已导入完成，可以直接 scene.open。'
+                    : `⚠️ 场景在超时内仍未导入完成（${lastReason || '未知'}）—— ` +
+                      '现在 scene.open 会失败并让场景操作卡住，请稍后再试。',
+            };
         },
         safety: 'write',
     }),
@@ -122,7 +149,7 @@ const EDITOR_TOOLS = [
         inputSchema: { type: 'object', properties: {} },
         op: 'scene.save',
         safety: 'write',
-        timeoutMs: 60000,
+        timeoutMs: 120000,
     }),
     T('scene.reload', {
         title: '软重载场景',
@@ -130,7 +157,7 @@ const EDITOR_TOOLS = [
         inputSchema: { type: 'object', properties: {} },
         op: 'scene.reload',
         safety: 'danger',
-        timeoutMs: 60000,
+        timeoutMs: 120000,
     }),
     T('scene.close', {
         title: '关闭场景',
@@ -257,13 +284,21 @@ const EDITOR_TOOLS = [
                 // 事务失败要作为工具错误抛出去，让 MCP 客户端看到 isError。
                 // ⚠️ 回滚结果必须写进错误信息 —— 模型要靠它判断「场景现在脏不脏」，
                 //    只说「失败了」而不说「回滚了没有」是不够的。
-                const rollbackNote = r.rolledBack
-                    ? '已回滚：场景已恢复到事务执行前的状态，无需手工清理。'
-                    : `⚠️ 回滚未完全成功，场景可能处于中间态，请检查并手工修复。${
-                          r.rollbackErrors && r.rollbackErrors.length
-                              ? '回滚出错：' + r.rollbackErrors.join('；')
-                              : ''
-                      }`;
+                // ⚠️ 文案要分三档 ——
+                //    模型主要消费的是**错误文本**，不是结构化字段。
+                //    把「按要求未回滚」说成「回滚失败」会让模型手工再补一次 → 重复应用。
+                const rollbackNote = r.outcomeUnknown
+                    ? '⚠️ 结果未知：编辑器可能已经执行了该操作但响应没有回来，场景状态不确定。' +
+                      '请先用 scene.tree 核对当前状态，再决定是否重试。'
+                    : r.rollbackSkipped
+                      ? `⚠️ 按要求未回滚（rollback=false）：已完成的 ${r.completed} 步仍在场景里，请手工处理。`
+                      : r.rolledBack
+                        ? '已回滚：场景已恢复到事务执行前的状态，无需手工清理。'
+                        : `⚠️ 回滚未完全成功，场景可能处于中间态，请检查并手工修复。${
+                              r.rollbackErrors && r.rollbackErrors.length
+                                  ? '回滚出错：' + r.rollbackErrors.join('；')
+                                  : ''
+                          }`;
                 const err = new Error(`${r.error}（${rollbackNote}）`);
                 err.transaction = r;
                 throw err;
@@ -364,9 +399,12 @@ const EDITOR_TOOLS = [
         title: '节点剪贴板',
         description:
             '节点的复制 / 剪切 / 粘贴。action 取值：copy（复制）、cut（剪切）、paste（粘贴）。\n' +
-            'copy 只需要 node；cut 需要 node（会把节点移出层级，**破坏性**，要 confirm=true）；' +
-            'paste 需要 node（被粘贴的源）和 target（粘贴到哪个父节点）。\n' +
-            '粘贴后返回新节点 uuid 列表。',
+            'copy 只需要 node —— 把节点放进剪贴板，原节点保留，返回 clipboardKey（粘贴时用）。\n' +
+            'cut 需要 node —— 放进剪贴板**并从场景里删掉**（破坏性，要 confirm=true），' +
+            '返回 clipboardKey 与被删节点的 uuid。\n' +
+            '（注：Cocos 自带的 cut-node 在 3.8.8 上只备剪贴板不删节点，本工具自己补上了删除这一步。）\n' +
+            'paste 需要 node（剪贴板里的那个 uuid，即上一步的 clipboardKey）和 target（粘贴到哪个父节点），' +
+            '返回新节点 uuid 列表。',
         inputSchema: {
             type: 'object',
             properties: {
@@ -483,14 +521,35 @@ const EDITOR_TOOLS = [
         inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
         op: 'asset.info',
     }),
+    T('asset.isImported', {
+        title: '资源是否导入完成',
+        description:
+            '查资源是否已经**导入完成**（能不能安全地打开/引用它）。url 传 db://assets/xxx.scene，uuid 传资源 uuid，二选一。\n' +
+            '⚠️ 别用 asset.info 的 imported 字段判断 —— 那个字段在资源刚创建时就会**提前**返回 true，' +
+            '而此时引擎还没导入完，强行打开场景会让**整个场景操作卡死**（所有场景工具无响应）。\n' +
+            '判据是本地库产物文件是否已生成，这个才准。',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                url: { type: 'string', description: 'db://assets/xxx.scene' },
+                uuid: { type: 'string', description: '资源 uuid（与 url 二选一）' },
+            },
+        },
+        op: 'asset.isImported',
+    }),
     T('asset.create', {
         title: '创建资源',
         description:
             '在资源库里创建一个新资源文件（如 .scene / .prefab / .json）。content 传文件内容。\n' +
+            'overwrite=true 时同名资源会被覆盖（默认不覆盖）。\n' +
             '⚠️ Cocos 会在创建后触发一次资源导入，**可能要十几秒**才返回，这是引擎行为不是卡死。',
         inputSchema: {
             type: 'object',
-            properties: { url: { type: 'string' }, content: { type: 'string' } },
+            properties: {
+                url: { type: 'string' },
+                content: { type: 'string' },
+                overwrite: { type: 'boolean', description: '同名资源已存在时覆盖，默认 false' },
+            },
             required: ['url'],
         },
         op: 'asset.create',

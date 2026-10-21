@@ -15,7 +15,8 @@
     "install:extension": "node scripts/install-extension.js",
     "test:e2e": "node test/e2e.js",
     "test:smoke": "node test/tool-smoke.js",
-    "gen:readme": "node scripts/gen-readme-tools.js"
+    "gen:readme": "node scripts/gen-readme-tools.js",
+    "test:real": "node test/real-behavior.test.js"
   },
   "files": [
     "hub/",

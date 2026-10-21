@@ -12,7 +12,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { runTransaction, findCompIndex, rollbackAll, isOutcomeUnknown, sceneRootUuid, findNodeByNameUnder } = require('../src/tools/transaction');
+const { runTransaction, findCompIndex, rollbackAll, isOutcomeUnknown, sceneRootUuid, findNodeByNameUnder, captureNode } = require('../src/tools/transaction');
 
 /** 模拟一个极简场景：节点表 + 组件表。 */
 function makeScene() {
@@ -34,7 +34,8 @@ function makeScene() {
             active: opts.active !== false,
             position: opts.position || { x: 0, y: 0, z: 0 },
             scale: opts.scale || { x: 1, y: 1, z: 1 },
-            rotation: opts.rotation || { x: 0, y: 0, z: 0, w: 1 },
+            // 真机 dump 里的 rotation 是**欧拉角 {x,y,z}（度）**，不是四元数
+            rotation: opts.rotation || { x: 0, y: 0, z: 0 },
             comps: [],
             children: [],
         };
@@ -81,10 +82,19 @@ function makeScene() {
                         dump: {
                             name: n.name,
                             active: n.active,
-                            position: n.position,
-                            scale: n.scale,
-                            rotation: n.rotation,
-                            parent: n.parent ? { uuid: n.parent } : null,
+                            // ⚠️ 必须还原**真机**的 dump 形状（Cocos Creator 3.8.8 实测）：
+                            //    position / scale / rotation 是 IProperty 包装，真值在 .value；
+                            //    rotation 是**欧拉角 {x,y,z}（度）**，不是四元数；
+                            //    parent 是 IProperty，uuid 在 .value.uuid。
+                            //    mock 形状写错 → 事务的 undo 测不到真实问题。
+                            position: { name: 'position', value: n.position, type: 'cc.Vec3' },
+                            scale: { name: 'scale', value: n.scale, type: 'cc.Vec3' },
+                            rotation: { name: 'eulerAngles', value: n.rotation, type: 'cc.Vec3' },
+                            parent: {
+                                name: 'parent',
+                                value: n.parent ? { uuid: n.parent } : null,
+                                type: 'cc.Node',
+                            },
                             children: n.children.map((uuid) => ({ uuid })),
                             __comps__: n.comps.map((c) => ({
                                 type: comps.get(c).type,
@@ -405,25 +415,23 @@ test('★ findNodeByNameUnder：父节点解析不出来时必须放弃（不瞎
     assert.ok(await findNodeByNameUnder(ctx, other.uuid, 'Unique'));
 });
 
-test('node.delete 的 undo 会把 rotation 按角度恢复（四元数不能直接下发）', async () => {
+test('★ node.delete 的 undo 会按欧拉角恢复 rotation（真机 dump 里是欧拉角不是四元数）', async () => {
     const ctx = makeScene();
     const root = await ctx.call('node.create', { parent: null, name: 'Root' });
     const leaf = await ctx.call('node.create', { parent: root.uuid, name: 'Leaf' });
-    // 场景 dump 里 rotation 是四元数
-    const origCall = ctx.call.bind(ctx);
-    ctx.call = async (op, args) => {
-        if (op === 'scene.node') {
-            const r = await origCall(op, args);
-            r.dump.rotation = { x: 0, y: 0, z: 0.7071, w: 0.7071 };
-            return r;
-        }
-        return origCall(op, args);
-    };
+    // 节点本身带一个非零旋转（欧拉角，度）。
+    // ⚠️ node.create 返回的是**副本** —— 要改得从 ctx.state.nodes 里取真实节点，
+    //    否则旋转设在了副本上，场景里的节点还是 0 旋转。
+    ctx.state.nodes.get(leaf.uuid).rotation = { x: 10, y: 20, z: 30 };
+
     const calls = [];
-    ctx.call = (async (op, args) => {
+    const origCall = ctx.call.bind(ctx);
+    // ⚠️ 只包装一次。之前这里写了两个 ctx.call 赋值，第二个把第一个整个顶掉，
+    //    导致「注入旋转」从来没生效过 —— 而断言只看 typeof === 'number'，照样通过。
+    ctx.call = async (op, args) => {
         calls.push([op, args]);
         return origCall(op, args);
-    });
+    };
 
     const r = await runTransaction(
         [
@@ -442,7 +450,25 @@ test('node.delete 的 undo 会把 rotation 按角度恢复（四元数不能直�
         }
     );
     assert.strictEqual(r.ok, false);
-    const transformCall = calls.find((c) => c[0] === 'node.transform' && c[1] && c[1].rotation !== undefined);
-    assert.ok(transformCall, 'undo 应下发 rotation');
-    assert.strictEqual(typeof transformCall[1].rotation, 'number', '★ rotation 必须是角度（数字），不能是四元数');
+
+    const tf = calls.find((c) => c[0] === 'node.transform' && c[1] && c[1].rotation !== undefined);
+    assert.ok(tf, 'undo 应下发 rotation');
+    const rot = tf[1].rotation;
+    // ★ 必须是欧拉角对象 {x,y,z}，且数值与原值一致
+    assert.ok(rot && typeof rot === 'object', 'rotation 应是欧拉角对象，不是数字也不是四元数');
+    assert.strictEqual(Number(rot.x), 10, 'rotation.x 应还原');
+    assert.strictEqual(Number(rot.y), 20, 'rotation.y 应还原');
+    assert.strictEqual(Number(rot.z), 30, 'rotation.z 应还原');
+    assert.strictEqual(rot.w, undefined, '★ 不应出现四元数的 w 分量');
+});
+
+test('captureNode 从真机形状里正确解出 position / rotation / parent', async () => {
+    const ctx = makeScene();
+    const root = await ctx.call('node.create', { parent: null, name: 'Root' });
+    const child = await ctx.call('node.create', { parent: root.uuid, name: 'Child' });
+    const st = await captureNode(ctx, child.uuid);
+    assert.deepStrictEqual(st.position, { x: 0, y: 0, z: 0 }, 'position 应解包成纯对象');
+    assert.deepStrictEqual(st.rotation, { x: 0, y: 0, z: 0 }, 'rotation 应解包成欧拉角');
+    assert.strictEqual(st.parentUuid, root.uuid, 'parent uuid 应从 parent.value.uuid 取');
+    assert.strictEqual(st.childCount, 0);
 });

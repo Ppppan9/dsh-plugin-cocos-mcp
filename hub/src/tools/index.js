@@ -143,9 +143,9 @@ class ToolRegistry {
      */
     async call(name, args = {}) {
         this._rebuild(false);
-        // M11：之前 schema 里声明了 rollback 开关但 handler 从不读它 —— 空承诺。
-        // 现在它真的生效：rollback=false 时不做回滚（并如实告知「场景可能处于中间态」）。
-        this._rollbackEnabled = args.rollback !== false;
+        // ⚠️ 这个标志必须放在**本次调用的 ctx** 里，不能存注册表实例上 ——
+        //    MCP 服务器并发处理请求时，A 的 rollback:false 会被 B 的调用重置，
+        //    导致事务意外回滚。
         const entry = this._byName.get(name);
         if (!entry) {
             const available = [...this._byName.keys()].slice(0, 40);
@@ -175,7 +175,7 @@ class ToolRegistry {
             },
             listEditors: this.listEditors,
             toolName: name,
-            rollbackEnabled: this._rollbackEnabled !== false,
+            rollbackEnabled: args.rollback !== false,
         };
 
         if (kind === 'global') {
