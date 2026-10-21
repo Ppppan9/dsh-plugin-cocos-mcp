@@ -268,6 +268,55 @@ async function main() {
             note('工程里没有 .prefab，跳过');
         }
 
+        // ── 12. 「未导入的场景」必须被**前置拦截**，且不能把频道搞挂 ──
+        // 这是本轮最核心的一条：打开一个还没导入完的场景会让**整个 scene 频道中毒**
+        // （query-node-tree 永远不返回，后面所有场景操作全挂）。
+        // 做法：把一个已导入场景的 library 库产物挪走 → 模拟「还没导入完」。
+        console.log('\n▸ 12. 未导入场景的前置拦截');
+        {
+            const projRoot = ed.projectPath;
+            const u = await c.call('asset.uuid', { url: 'db://assets/scenes/e2e-scene.scene' });
+            const suuid = u.data && u.data.uuid ? u.data.uuid : u.data;
+            const libFile = path.join(projRoot, 'library', String(suuid).slice(0, 2), `${suuid}.json`);
+            if (!suuid || !fs.existsSync(libFile)) {
+                note('拿不到 e2e-scene 的库产物，跳过「未导入拦截」验证');
+            } else {
+                const bak = libFile + '.bak_real_test';
+                fs.renameSync(libFile, bak);
+                try {
+                    const st = await c.call('asset.isImported', { uuid: suuid });
+                    assert(
+                        st.data && st.data.imported === false,
+                        '库产物缺失时 asset.isImported 判为未导入',
+                        JSON.stringify(st.data || st.text).slice(0, 120)
+                    );
+                    assert(
+                        st.data && st.data.reason && st.data.reason.length > 4,
+                        '未导入时给出可行动的原因',
+                        st.data && st.data.reason ? st.data.reason : '(无)'
+                    );
+
+                    const openRes = await c.call('scene.open', { uuid: suuid });
+                    assert(openRes.isError, '未导入的场景被拒绝打开', String(openRes.text).slice(0, 100));
+                    assert(
+                        /还没导入完成/.test(String(openRes.text)),
+                        '拒绝原因明确指向「导入未完成」',
+                        String(openRes.text).slice(0, 140)
+                    );
+
+                    // ★ 关键：拒绝之后频道必须还健康
+                    const treeAfter = await c.call('scene.tree');
+                    assert(
+                        !treeAfter.isError,
+                        '★ 拦截没有把 scene 频道搞挂（拒绝后 scene.tree 仍可用）',
+                        String(treeAfter.text).slice(0, 100)
+                    );
+                } finally {
+                    fs.renameSync(bak, libFile);
+                }
+            }
+        }
+
     } catch (e) {
         bad('执行中断', e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : String(e));
     } finally {
