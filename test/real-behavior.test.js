@@ -353,11 +353,37 @@ async function main() {
             note('工程里没有 .prefab，跳过');
         }
 
-        // ── 12. 「未导入的场景」必须被**前置拦截**，且不能把频道搞挂 ──
+        // ── 12. 参数过滤必须真的生效 ─────────────────────────────
+        // ⚠️ scene.classes 之前把 extends **静默丢了**（hub 传扁平、bridge 读嵌套），
+        //    传什么都返回全部组件类 —— 看起来"能用"，其实参数完全无效。
+        //    这类 bug 只有真机比对类数才能发现。
+        console.log('\n▸ 12. 参数过滤真的生效');
+        {
+            const all = await c.call('scene.classes', {});
+            const onlyNode = await c.call('scene.classes', { extends: 'cc.Node' });
+            const countAll = (all.data && all.data.count) || 0;
+            const countNode = (onlyNode.data && onlyNode.data.count) || 0;
+            assert(
+                !all.isError && !onlyNode.isError,
+                'scene.classes 两种调用都成功',
+                (all.isError ? all.text : '') + (onlyNode.isError ? onlyNode.text : '')
+            );
+            assert(
+                onlyNode.data && onlyNode.data.extends === 'cc.Node',
+                '★ 返回的 extends 与请求一致（过滤器真的生效了）',
+                onlyNode.data ? onlyNode.data.extends : '(无)'
+            );
+            assert(
+                countNode < countAll,
+                `★ 过滤后类数确实变少（${countNode} < ${countAll}）—— 说明 extends 传到了引擎`
+            );
+        }
+
+        // ── 13. 「未导入的场景」必须被**前置拦截**，且不能把频道搞挂 ──
         // 这是本轮最核心的一条：打开一个还没导入完的场景会让**整个 scene 频道中毒**
         // （query-node-tree 永远不返回，后面所有场景操作全挂）。
         // 做法：把一个已导入场景的 library 库产物挪走 → 模拟「还没导入完」。
-        console.log('\n▸ 12. 未导入场景的前置拦截');
+        console.log('\n▸ 13. 未导入场景的前置拦截');
         {
             const projRoot = ed.projectPath;
             const u = await c.call('asset.uuid', { url: 'db://assets/scenes/e2e-scene.scene' });
@@ -402,10 +428,10 @@ async function main() {
             }
         }
 
-        // ── 13. 离线 prefab 编辑器的**写盘路径**（真实文件上跑）──
+        // ── 14. 离线 prefab 编辑器的**写盘路径**（真实文件上跑）──
         // ⚠️ 之前只测过「读」，写盘路径在真机上从没跑过 ——
         //    而写盘恰恰是最容易出事的地方（原子写、.meta 事务、失败零写入）。
-        console.log('\n▸ 13. 离线 prefab 写盘路径（真实文件）');
+        console.log('\n▸ 14. 离线 prefab 写盘路径（真实文件）');
         {
             const prefabPath = path.join(ed.projectPath, 'assets', 'smoke-sample.prefab');
             if (!fs.existsSync(prefabPath)) {
