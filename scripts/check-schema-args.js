@@ -31,6 +31,16 @@ function extractOpBodies(src) {
     return ops;
 }
 
+/**
+ * 检测「解构式读取参数」。
+ * ⚠️ `const { url, pattern } = args` 这种写法正则抓不到 ——
+ *    检查器会**静默地**漏掉这些参数，断言照样通过 → 检查器失效却没人知道。
+ *    所以：检测到解构就**报出来**（宁可吵，也不能静默失效）。
+ */
+function hasDestructuring(body) {
+    return /(?:const|let|var)\s*\{[^}]*\}\s*=\s*args\b/.test(body) || /=\s*args\s*;/.test(body);
+}
+
 /** 某个 op 真正读到的参数名。 */
 function argsUsed(body) {
     const used = new Set();
@@ -41,7 +51,7 @@ function argsUsed(body) {
     return [...used].sort();
 }
 
-module.exports = { extractOpBodies, argsUsed, HANDLERS, ROOT };
+module.exports = { extractOpBodies, argsUsed, hasDestructuring, HANDLERS, ROOT };
 
 if (require.main === module) {
     const src = fs.readFileSync(HANDLERS, 'utf8');
@@ -54,6 +64,13 @@ if (require.main === module) {
         const body = ops.get(t.op);
         if (!body) {
             console.log(`  ? ${t.name} → op "${t.op}" 在 handlers.js 里找不到`);
+            continue;
+        }
+        if (hasDestructuring(body)) {
+            bad++;
+            console.log(
+                `  ! ${t.name} (op ${t.op}) → 用了解构式读取参数，自动检查**抓不到**，需要人工确认`
+            );
             continue;
         }
         const declared = new Set(Object.keys((t.inputSchema || {}).properties || {}));

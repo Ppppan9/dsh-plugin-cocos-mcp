@@ -380,7 +380,7 @@ test('工具 schema 必须覆盖 Bridge 侧真正支持的参数', () => {
     //    比对逻辑放在 scripts/check-schema-args.js（可单独跑），
     //    那里用「顶层键切分」精确取每个 op 的源码 —— 用正则配对大括号会错位，
     //    把相邻 op 的参数算进来。
-    const { extractOpBodies, argsUsed } = require('../scripts/check-schema-args');
+    const { extractOpBodies, argsUsed, hasDestructuring } = require('../scripts/check-schema-args');
     const ops = extractOpBodies(read('extension/bridge/handlers.js'));
     const problems = [];
     for (const t of EDITOR_TOOLS) {
@@ -388,6 +388,11 @@ test('工具 schema 必须覆盖 Bridge 侧真正支持的参数', () => {
         const body = ops.get(t.op);
         if (!body) {
             problems.push(`${t.name} → op "${t.op}" 在 handlers.js 里找不到`);
+            continue;
+        }
+        // ⚠️ 解构式读取参数正则抓不到 —— 宁可吵，也不能让检查器**静默失效**
+        if (hasDestructuring(body)) {
+            problems.push(`${t.name} (op ${t.op}) 用了解构式读取参数，自动检查抓不到，需人工确认`);
             continue;
         }
         const declared = new Set(Object.keys((t.inputSchema || {}).properties || {}));
