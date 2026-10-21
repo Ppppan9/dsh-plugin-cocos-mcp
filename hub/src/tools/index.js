@@ -102,6 +102,12 @@ function validateArgs(tool, args) {
         } else if (t === 'object' && (typeof value !== 'object' || Array.isArray(value))) {
             errors.push(`参数 "${key}" 应为对象，实际收到${typeName(value)}`);
         }
+        if (spec.minimum !== undefined && typeof value === 'number' && value < spec.minimum) {
+            errors.push(`参数 "${key}" 不能小于 ${spec.minimum}`);
+        }
+        if (spec.maximum !== undefined && typeof value === 'number' && value > spec.maximum) {
+            errors.push(`参数 "${key}" 不能大于 ${spec.maximum}`);
+        }
         if (spec.enum && !spec.enum.includes(value)) {
             errors.push(`参数 "${key}" 只能是 ${spec.enum.map((v) => JSON.stringify(v)).join(' / ')}，实际收到 ${JSON.stringify(value)}`);
         }

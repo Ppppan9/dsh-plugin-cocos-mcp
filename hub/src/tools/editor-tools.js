@@ -116,7 +116,10 @@ const EDITOR_TOOLS = [
                 path: { type: 'string', description: '目录，如 db://assets/scenes' },
                 waitMs: {
                     type: 'number',
-                    description: '等待引擎导入完成的上限（毫秒），默认 90000。超时后仍会返回，只是 imported=false。',
+                    minimum: 0,
+                    description:
+                        '等待引擎导入完成的上限（毫秒），默认 90000。超时后仍会返回，只是 imported=false。' +
+                        '传 0 表示不等（立即返回当前状态）。',
                 },
             },
             required: ['name'],
@@ -134,9 +137,18 @@ const EDITOR_TOOLS = [
             //    asset-info / imported 字段都会**提前**变真，不能用。
             // ⚠️ waitMs 要**自己**也兜住：即使校验层放过了脏值
             //    （比如从别的调用路径进来的），也不能让等待循环一次都不跑。
+            //    语义：
+            //      未传 / 非法值（非有限数） → 用默认 90s；
+            //      0 → **如实尊重**（不等，立即返回 imported:false），
+            //           这和「非法值静默变成 0」是两回事 —— 前者是用户的明确要求，
+            //           后者是会误导人的静默错误；
+            //      负数 → 报错（校验层也会拦）。
             const waitRaw = Number(args.waitMs);
-            const waitMs =
-                args.waitMs === undefined || !Number.isFinite(waitRaw) || waitRaw <= 0 ? 90000 : waitRaw;
+            let waitMs = 90000;
+            if (args.waitMs !== undefined && Number.isFinite(waitRaw)) {
+                if (waitRaw < 0) throw new Error(`waitMs 不能是负数（收到 ${waitRaw}）`);
+                waitMs = waitRaw;
+            }
             const deadline = Date.now() + waitMs;
             let ready = false;
             let lastReason = null;

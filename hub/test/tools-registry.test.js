@@ -91,3 +91,32 @@ test('没有编辑器实例时，提示要说「先打开项目并启用扩展�
         '真没实例时的提示要能指导用户'
     );
 });
+
+test('参数校验：null / 非法类型 / 越界 / 未知键都要明确报错', async () => {
+    const reg = makeRegistry([
+        { shortName: 'p', pid: process.pid, url: 'http://127.0.0.1:7523/bridge', token: 't'.repeat(32) },
+    ]);
+    reg._rebuild(true);
+
+    // null 不是「没传」—— 它会一路变成 0 / NaN，让「等 90 秒」变成「一次都不等」
+    await assert.rejects(() => reg.call('scene.create', { name: 'x', waitMs: null }), /不能是 null/);
+    await assert.rejects(() => reg.call('scene.create', { name: 'x', waitMs: 'abc' }), /应为数字/);
+    await assert.rejects(() => reg.call('scene.create', { name: 'x', waitMs: -1 }), /不能小于 0/);
+    await assert.rejects(() => reg.call('scene.create', { name: 'x', waitSeconds: 5 }), /未知参数/);
+    await assert.rejects(() => reg.call('scene.create', {}), /缺少必填参数/);
+});
+
+test('waitMs=0 应当被如实尊重（不等，立即返回当前状态）', async () => {
+    // ⚠️ 0 与「非法值静默变成 0」是两回事：
+    //    前者是用户的明确要求（不等），后者是会误导人的静默错误。
+    const fake = { invoke: async () => ({ imported: false, reason: '测试' }) };
+    const reg = new ToolRegistry({
+        getClient: () => fake,
+        listEditors: () => [{ shortName: 'p', pid: process.pid, url: 'http://127.0.0.1:7523/bridge', token: 't'.repeat(32) }],
+    });
+    reg._rebuild(true);
+    const t0 = Date.now();
+    const r = await reg.call('scene.create', { name: 'x', waitMs: 0 });
+    assert.ok(Date.now() - t0 < 3000, 'waitMs=0 应该立即返回，不该等 90 秒');
+    assert.strictEqual(r.imported, false, '没等到导入完成就该如实返回 false');
+});
