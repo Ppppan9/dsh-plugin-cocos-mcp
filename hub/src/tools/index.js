@@ -56,6 +56,17 @@ function validateArgs(tool, args) {
 
     for (const key of required) {
         if (args[key] === undefined || args[key] === null) {
+            if (key === 'confirm' && tool.safety === DANGER) {
+                // ⚠️ confirm 缺失要给出**最有指导性**的那句话 ——
+                //    「这是破坏性操作」比「缺少必填参数 confirm」有用得多。
+                //    （之前危险操作检查在前、schema 校验在后，恰好是反过来的，
+                //      差点把这条提示覆盖掉。）
+                errors.push(
+                    `这是破坏性操作，必须显式传 confirm=true 才会执行` +
+                    `（如果你已经确认过，请把 confirm: true 和其它参数放在同一次调用里）`
+                );
+                continue;
+            }
             errors.push(`缺少必填参数 "${key}"`);
         }
     }
@@ -226,17 +237,10 @@ class ToolRegistry {
         const { tool, kind } = entry;
         const client = entry.editor ? this.getClient(entry.editor) : null;
 
-        // ⚠️ 先按声明的 schema 校验参数 —— schema 是承诺，声明了就得执行。
-        //    放在危险操作检查**之前**：参数本身就不对时，先说参数的事。
+        // ⚠️ 按声明的 schema 校验参数 —— schema 是承诺，声明了就得执行。
+        //    危险操作的 confirm 检查已经并进校验里（错误信息更完整，
+        //    见 validateArgs 里的说明），这里不再单独抛。
         validateArgs(tool, args);
-
-        // 危险操作二次校验（不依赖 schema）
-        if (tool.safety === DANGER && args.confirm !== true) {
-            throw new Error(
-                `工具 "${name}" 是破坏性操作，必须显式传 confirm=true 才会执行。` +
-                `如果你已经确认过，请把 confirm: true 和其它参数放在同一次调用里。`
-            );
-        }
 
         const ctx = {
             call: (op, opArgs) => {
