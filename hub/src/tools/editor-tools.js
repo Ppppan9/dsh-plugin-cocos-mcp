@@ -24,8 +24,8 @@ const fs = require('fs');
 const path = require('path');
 
 const { runTransaction } = require('./transaction');
+const { T } = require('./schema');
 
-const T = (name, spec) => ({ name, safety: 'read', ...spec });
 
 /**
  * 空白场景模板

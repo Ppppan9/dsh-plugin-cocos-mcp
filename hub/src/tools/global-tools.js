@@ -19,7 +19,7 @@ const { realpathBestEffort, isInsideAnyRoot } = require('../util/path-guard');
 const KNOWLEDGE = require('../knowledge/cocos-knowledge.json');
 const EDITOR_MESSAGES = require('../knowledge/editor-messages.json');
 
-const T = (name, spec) => ({ name, safety: 'read', ...spec });
+const { T } = require('./schema');
 
 // ─────────────────────────────────────────────────────────────
 // 路径护栏：所有离线文件操作必须落在某个已知项目目录内

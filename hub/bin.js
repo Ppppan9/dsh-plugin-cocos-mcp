@@ -94,6 +94,12 @@ async function main() {
                 rec.ping = await client.ping();
                 rec.ops = (await client.describe()).ops.length;
                 rec.ok = true;
+                // ⚠️ 心跳超时但进程还在 → 编辑器正忙，不是「没装扩展」。
+                //    probe 要把这个区别说出来，否则排查会往错的方向走。
+                if (e.stale) {
+                    rec.stale = true;
+                    rec.staleNote = '心跳超时（编辑器可能正忙）';
+                }
             } catch (err) {
                 rec.error = err.message;
             }

@@ -301,6 +301,50 @@ test('scene.open 的超时预算：hub 侧必须盖得住 Bridge 侧的最坏路
     );
 });
 
+test('scene.script 的 method 白名单：schema 与 Bridge 实现必须一致', () => {
+    // ⚠️ 这份名单在**两个地方**：hub 侧 inputSchema 的 enum（给模型看、参数校验用）
+    //    与 bridge 侧的白名单（真正执行时拦）。
+    //    两边一旦漂移，模型会收到「schema 说可以、实际被拒」或者反过来的错配。
+    const schemaList = (EDITOR_TOOLS.find((t) => t.name === 'scene.script').inputSchema.properties.method.enum) || [];
+    const m = handlersSrc.match(/const ALLOWED = \[([^\]]+)\]/);
+    assert.ok(m, '解析不到 bridge 侧 scene.script 的 ALLOWED 白名单');
+    const bridgeList = m[1]
+        .split(',')
+        .map((s) => s.trim().replace(/^['"]|['"]$/g, ''))
+        .filter(Boolean);
+    assert.deepStrictEqual(
+        [...schemaList].sort(),
+        [...bridgeList].sort(),
+        'scene.script 的 method 名单两边不一致（schema 与 Bridge 实现必须同步）'
+    );
+    assert.ok(schemaList.length > 0, '白名单不能为空');
+});
+
+test('每个工具声明的 inputSchema 都是自洽的', () => {
+    // ⚠️ 声明了却**从不执行**的 schema 是假的承诺（参数校验现在真的执行了，
+    //    所以 schema 自相矛盾会直接变成「合法的调用被拒」）。
+    for (const t of [...EDITOR_TOOLS, ...GLOBAL_TOOLS]) {
+        const s = t.inputSchema || {};
+        for (const key of s.required || []) {
+            assert.ok(
+                (s.properties || {})[key] !== undefined,
+                `${t.name} 的 required 里有 "${key}"，但 properties 里没声明它`
+            );
+        }
+        for (const [key, spec] of Object.entries(s.properties || {})) {
+            if (spec.enum) {
+                assert.ok(spec.enum.length > 0, `${t.name}.${key} 的 enum 是空的`);
+            }
+        }
+        if (t.safety === 'danger') {
+            assert.ok(
+                (s.required || []).includes('confirm'),
+                `${t.name} 是破坏性操作但 required 里没有 confirm`
+            );
+        }
+    }
+});
+
 test('README 的工具清单与实际工具一致', () => {
     const all = [...EDITOR_TOOLS, ...GLOBAL_TOOLS];
     // README 里写的工具数量

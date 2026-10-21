@@ -19,24 +19,89 @@ const { DEFAULT_TIMEOUT_MS } = require('../editor-client');
  *   - 执行前再校验一次 args.confirm === true，不靠 schema 兜底。
  */
 
-const DANGER = 'danger';
 
-function toSchema(tool) {
-    const schema = {
-        type: 'object',
-        properties: { ...(tool.inputSchema.properties || {}) },
-        required: [...(tool.inputSchema.required || [])],
-    };
-    if (tool.safety === DANGER) {
-        schema.properties.confirm = {
-            type: 'boolean',
-            const: true,
-            description: '破坏性操作确认位。必须显式传 true 才会执行。',
-        };
-        if (!schema.required.includes('confirm')) schema.required.push('confirm');
-    }
-    return schema;
+function typeName(v) {
+    if (v === null) return 'null';
+    if (Array.isArray(v)) return '数组';
+    return { string: '字符串', number: '数字', boolean: '布尔值', object: '对象' }[typeof v] || typeof v;
 }
+
+/**
+ * 按**声明的** inputSchema 校验参数。
+ *
+ * ⚠️ 为什么必须做：schema 是我们对调用方的**承诺**。
+ *    声明了却从不执行 = 承诺是假的，错误会变成静默的：
+ *      - `waitMs: "abc"` → Number() 得 NaN → 等待循环一次都不跑 →
+ *        立刻返回「未导入完成」，看起来像引擎问题，其实是参数写错了；
+ *      - 把 `waitSeconds` 拼成 `waitsecond` → **静默忽略** → 用默认值，
+ *        调用方以为设了、其实没设；
+ *      - `enum` 写错（比如 selector 传 'tre'）→ 静默走兜底分支。
+ *    这些都属于「静默的错误答案比报错危险得多」。
+ *
+ * @throws 协议级错误（-32602），调用方能明确知道是参数问题
+ */
+function validateArgs(tool, args) {
+    // ⚠️ 必须用 **toSchema(tool)** —— 那才是**客户端看到的** schema。
+    //    原始 inputSchema 里没有 danger 工具自动加上的 `confirm`，
+    //    用原始的会把合法的 confirm=true 判成「未知参数」。
+    const schema = toSchema(tool);
+    const props = schema.properties || {};
+    const required = schema.required || [];
+    const errors = [];
+
+    if (args === undefined || args === null) args = {};
+    if (typeof args !== 'object' || Array.isArray(args)) {
+        throw invalidArgs(tool.name, ['参数必须是一个对象']);
+    }
+
+    for (const key of required) {
+        if (args[key] === undefined || args[key] === null) {
+            errors.push(`缺少必填参数 "${key}"`);
+        }
+    }
+
+    for (const key of Object.keys(args)) {
+        const value = args[key];
+        if (value === undefined || value === null) continue;
+        const spec = props[key];
+        if (!spec) {
+            errors.push(
+                `未知参数 "${key}"（可用参数：${Object.keys(props).join('、') || '无'}）`
+            );
+            continue;
+        }
+        const t = spec.type;
+        if (t === 'string' && typeof value !== 'string') {
+            errors.push(`参数 "${key}" 应为字符串，实际收到${typeName(value)}`);
+        } else if (t === 'number' && typeof value !== 'number') {
+            errors.push(`参数 "${key}" 应为数字，实际收到${typeName(value)}`);
+        } else if (t === 'boolean' && typeof value !== 'boolean') {
+            errors.push(`参数 "${key}" 应为布尔值，实际收到${typeName(value)}`);
+        } else if (t === 'array' && !Array.isArray(value)) {
+            errors.push(`参数 "${key}" 应为数组，实际收到${typeName(value)}`);
+        } else if (t === 'object' && (typeof value !== 'object' || Array.isArray(value))) {
+            errors.push(`参数 "${key}" 应为对象，实际收到${typeName(value)}`);
+        }
+        if (spec.enum && !spec.enum.includes(value)) {
+            errors.push(`参数 "${key}" 只能是 ${spec.enum.map((v) => JSON.stringify(v)).join(' / ')}，实际收到 ${JSON.stringify(value)}`);
+        }
+        if (spec.const !== undefined && value !== spec.const) {
+            errors.push(`参数 "${key}" 必须是 ${JSON.stringify(spec.const)}`);
+        }
+    }
+
+    if (errors.length) throw invalidArgs(tool.name, errors);
+}
+
+/** 参数非法 → 协议级错误（-32602），按 MCP 规范，客户端据此知道是「参数问题」而不是「工具失败」。 */
+function invalidArgs(toolName, errors) {
+    const err = new Error(`工具 "${toolName}" 的参数不合法：\n  - ${errors.join('\n  - ')}`);
+    err.protocolCode = -32602;
+    return err;
+}
+
+// ⚠️ toSchema 直接用共享模块的实现 —— 仓库里只能有**一份** schema 定义。
+const { toSchema, DANGER } = require('./schema');
 
 function toMcpTool(tool, name) {
     return {
@@ -161,6 +226,10 @@ class ToolRegistry {
         const { tool, kind } = entry;
         const client = entry.editor ? this.getClient(entry.editor) : null;
 
+        // ⚠️ 先按声明的 schema 校验参数 —— schema 是承诺，声明了就得执行。
+        //    放在危险操作检查**之前**：参数本身就不对时，先说参数的事。
+        validateArgs(tool, args);
+
         // 危险操作二次校验（不依赖 schema）
         if (tool.safety === DANGER && args.confirm !== true) {
             throw new Error(
@@ -185,6 +254,16 @@ class ToolRegistry {
 
         if (!entry.editor) {
             throw new Error('当前没有连接到任何 Cocos Creator 实例。请先打开项目并启用 cocos-mcp 扩展。');
+        }
+        // ⚠️ 编辑器**在跑但没心跳**（正忙 / 场景频道卡死）——
+        //    这时再发消息过去只会干等到超时，而且报出来的是
+        //    「请求超时」这种没信息量的话。直接快速失败并说清楚。
+        if (entry.editor.stale) {
+            throw new Error(
+                `Cocos Creator 实例 "${entry.editor.shortName}" **没有响应**（心跳超时，进程还在）。` +
+                '它可能正忙（批量导入 / 构建 / 场景操作卡住）。请稍后重试；' +
+                '如果一直这样，重启 Cocos Creator。'
+            );
         }
         if (tool.handler) {
             // ⚠️ handler 型工具也必须走超时 ——

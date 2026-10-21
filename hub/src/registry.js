@@ -66,21 +66,39 @@ function isLoopbackUrl(url) {
 }
 
 /**
- * 校验一条注册记录。任何一项不通过就整条丢弃（而不是保留一个坏实例）。
+ * 校验一条注册记录。
+ *
+ * ⚠️ **心跳超时 ≠ 实例已死** ——
+ *    心跳是扩展主进程写的定时器；编辑器正忙时（在做资产导入、构建、
+ *    或者场景频道已经卡死），主进程被阻塞、心跳就停了。
+ *    实测踩过：编辑器只是忙，实例就被整条丢弃，
+ *    于是调用方收到「当前没有连接到任何 Cocos Creator 实例。
+ *    请先打开项目并启用 cocos-mcp 扩展」—— **扩展明明在跑**，这句话完全误导。
+ *
+ *    所以分成两种：
+ *      - **进程已退出**（pid 不在了）→ 真的没了，整条丢弃；
+ *      - **进程还在、只是心跳超时** → 保留，但标记 `stale`，
+ *        让上层报「编辑器无响应，可能正在忙」而不是「没装扩展」。
  */
 function validate(entry, now = Date.now(), staleMs = STALE_MS) {
     const reasons = [];
+    let stale = false;
     if (!entry || typeof entry !== 'object') reasons.push('记录不是对象');
     else {
         if (!entry.url) reasons.push('缺少 url');
         else if (!isLoopbackUrl(entry.url)) reasons.push('url 不是 loopback');
         if (!entry.token || typeof entry.token !== 'string' || entry.token.length < 16) reasons.push('token 缺失或过短');
-        if (!isPidAlive(entry.pid)) reasons.push('进程已退出');
+        const alive = isPidAlive(entry.pid);
+        if (!alive) reasons.push('进程已退出');
         const ts = Number(entry.ts) || 0;
         if (!ts) reasons.push('缺少心跳时间戳');
-        else if (now - ts > staleMs) reasons.push(`心跳超时（${Math.round((now - ts) / 1000)}s）`);
+        else if (now - ts > staleMs) {
+            // 进程还在 → 只是没心跳（编辑器忙 / 场景频道卡死），不是「实例没了」
+            if (alive) stale = true;
+            else reasons.push(`心跳超时（${Math.round((now - ts) / 1000)}s）`);
+        }
     }
-    return { ok: reasons.length === 0, reasons };
+    return { ok: reasons.length === 0, reasons, stale };
 }
 
 /**
@@ -171,8 +189,10 @@ class EditorRegistry {
         let reaped = 0;
         for (const e of raw) {
             const v = validate(e, now, this.staleMs);
-            if (v.ok) {
-                valid.push(e);
+            if (v.ok || v.stale) {
+                // stale = 进程还在、只是心跳停了（编辑器正忙）→ **保留**，
+                // 标记出来让上层说人话（"无响应" 而不是 "没装扩展"）。
+                valid.push(v.stale ? { ...e, stale: true } : e);
                 continue;
             }
             const dead = !e || typeof e.pid !== 'number' || !isPidAlive(e.pid);
