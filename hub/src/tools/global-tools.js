@@ -265,6 +265,10 @@ const GLOBAL_TOOLS = [
             );
         },
         safety: 'write',
+        // ⚠️ handler 型工具现在也会走 hub 的统一超时（默认 60s）。
+        //    大 prefab 的批量改动可能超过，给足预算 —— 超时砍掉一个**正在写盘**的
+        //    操作比慢更糟（调用方会以为失败，实际可能已经写完了）。
+        timeoutMs: 120000,
     }),
 
     T('cocos_prefab_batch', {
@@ -297,6 +301,8 @@ const GLOBAL_TOOLS = [
             return unwrapOffline(res, 'cocos_prefab_batch');
         },
         safety: 'write',
+        // 一次改几十个 prefab，默认 60s 远远不够
+        timeoutMs: 300000,
     }),
 
     T('cocos_prefab_ops', {
@@ -399,6 +405,7 @@ const GLOBAL_TOOLS = [
             );
         },
         safety: 'write',
+        timeoutMs: 120000,
     }),
 ];
 
