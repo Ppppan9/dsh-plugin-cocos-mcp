@@ -1192,8 +1192,9 @@ function createHandlers(ctx) {
                         throw new Error(
                             `不能删除当前打开的场景 "${args.url}"。` +
                             '删掉它会让编辑器留下一个指向已删除资源的引用，' +
-                            '之后打开任何场景都会挂死（整个场景操作卡住）。' +
-                            '请先 scene.close 再删。'
+                            '之后打开任何场景都有挂死的风险（引擎会打 “Open the previous scene failed”）。' +
+                            '要删它，先 scene.open 打开另一个场景（它就不再是当前场景了），再回来删。' +
+                            '注意：scene.close 在 3.8.8 的 general edit mode 下关不掉场景，所以别指望靠它来腾出。'
                         );
                     }
                 }

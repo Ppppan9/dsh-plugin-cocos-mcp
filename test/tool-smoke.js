@@ -252,9 +252,72 @@ async function main() {
     //    写死 'Scene' 的话，编辑器当前打开的如果是别的场景（比如上一轮测试留下的
     //    __ab_真实_xxx），后面所有 node.create 都会以「找不到节点 Scene」失败，
     //    整份冒烟报告全是噪音。
-    const rootName = (tree.data && tree.data.root) || 'Scene';
+    let rootName = (tree.data && tree.data.root) || 'Scene';
     if (rootName === 'Scene' && !(tree.data && tree.data.root)) {
         log('  ⚠️  读不到场景根节点名，回退到 "Scene"（可能解析失败）');
+    }
+
+    // ── 2. 场景生命周期 ──
+    // ⚠️ **必须排在节点操作之前** ——
+    //    实测（干净编辑器、可重复）：先做一组节点操作
+    //    （建节点 / 改激活 / 改 transform / 复制 / 移动 / 剪贴板复制），
+    //    **下一次打开场景必挂死**（90s 超时 → 整个 scene 频道中毒）。
+    //    对照组（只建一个节点 / 场景变脏 / 先保存 / 删掉上一个场景）全部正常。
+    //    引擎侧没有任何报错，消息既不 resolve 也不 reject —— 属于 Cocos 自身的问题。
+    //    所以本项目只能：把「打开场景」放在最前面（趁引擎还干净），
+    //    并靠超时 + 健康闸门兜住剩下的极端情况。
+    console.log('\n▸ 2. 场景生命周期');
+    // ⚠️ 场景名必须**每次唯一** ——
+    //    用固定名字会覆盖上一轮残留的同名场景，而覆盖后的资源导入状态是陈旧的，
+    //    紧接着 scene.open 就会挂起（实测 120s 超时）。
+    const sceneName = '__smoke_scene_' + Date.now().toString(36);
+    await check('scene.create', { name: sceneName, path: 'db://assets/scenes' });
+    const createdScene = await client.call('asset.query', { pattern: `db://assets/scenes/${sceneName}.scene` });
+    const cs = (createdScene.data && createdScene.data.assets) || [];
+    if (cs.length) {
+        const u = await client.call('asset.uuid', { url: cs[0].url });
+        const openRes = await check('scene.open', { uuid: u.data && u.data.uuid ? u.data.uuid : u.data });
+        if (openRes && openRes.isError) {
+            // ⚠️ 打开失败通常意味着**引擎侧的 scene 频道已经中毒** ——
+            //    后面所有场景操作都会挂。继续跑只会刷出一堆同源失败，
+            //    把「一个根因」变成「四个症状」，反而看不清问题。
+            //    这里明确停掉本段，并说明后续检查为什么没跑。
+            log('  ⚠️  scene.open 失败 → 引擎侧场景频道很可能已中毒，跳过本段剩余的场景检查');
+            log('     （save / reload / close / 根节点守卫都依赖同一个频道，跑也是超时）');
+        } else {
+            await new Promise((r) => setTimeout(r, 1800));
+            await check('scene.save', {});
+            await check('scene.reload', { confirm: true });
+            // ★ 真机验证新守卫：当前打开的场景**不能删** ——
+            //   删了会让编辑器留下指向已删除资源的引用，之后打开任何场景都会挂死。
+            await check('asset.delete', { url: cs[0].url, confirm: true }, { expectError: true });
+            // ⚠️ 实测 3.8.8 在 general edit mode 下**关不掉**普通场景
+            //    （引擎返回 false 并打 “Trying to close current edit scene ...”），
+            //    所以关不掉 → 新建的场景**一直是「当前场景」** → 删不掉它。
+            //    正确做法：**先打开另一个场景**，它就不再是当前场景了。
+            const closeRes = await client.call('scene.close', { confirm: true });
+            assert(
+                closeRes.isError ? /引擎拒绝关闭/.test(String(closeRes.text)) : true,
+                'scene.close 不报假成功（引擎拒绝关闭时要明确说出来）',
+                closeRes.isError ? String(closeRes.text).slice(0, 100) : '已关闭'
+            );
+            if (sceneUrl) {
+                const back = await client.call('asset.uuid', { url: sceneUrl });
+                await check('scene.open', { uuid: back.data && back.data.uuid ? back.data.uuid : back.data });
+                await new Promise((r) => setTimeout(r, 1200));
+            }
+            await check('asset.delete', { url: cs[0].url, confirm: true });
+        }
+    } else {
+        log('  ⚠️  scene.create 后没查到资源');
+    }
+
+    // ⚠️ 场景生命周期那一步可能已经切换了场景 —— 根节点名要**重新解析**，
+    //    否则临时节点会建到旧场景里去（或者直接「找不到节点」）。
+    {
+        const t2 = await client.call('scene.tree');
+        if (t2.data && t2.data.root) rootName = t2.data.root;
+        log(`  ℹ️  当前场景根节点：${rootName}`);
     }
 
     // 临时对象（挂在场景根下，不依赖 Canvas 是否建成）
@@ -264,8 +327,8 @@ async function main() {
     if (!n.isError && n.data && n.data.uuid) tempNodeUuid = n.data.uuid;
     log(`  ℹ️  临时节点 ${tempNodeUuid || '(建失败)'} / 临时 Canvas ${tempCanvasUuid || '(建失败)'}`);
 
-    // ── 2. 全局工具 ──
-    console.log('\n▸ 2. 全局工具');
+    // ── 3. 全局工具 ──
+    console.log('\n▸ 3. 全局工具');
     await check('cocos_knowledge', { topic: 'components' });
     await check('cocos_knowledge', { topic: 'coordinates' });
     await check('cocos_knowledge', { topic: 'messages' });
@@ -297,7 +360,7 @@ async function main() {
     }
 
     // ── 3. 场景 / 节点 / 组件 ──
-    console.log('\n▸ 3. 场景 / 节点 / 组件');
+    console.log('\n▸ 4. 场景 / 节点 / 组件');
     await check('scene.tree', {});
     await check('scene.status', {});
     await check('scene.bounds', {});
@@ -325,8 +388,8 @@ async function main() {
         ],
     });
 
-    // ── 4. 资源 ──
-    console.log('\n▸ 4. 资源');
+    // ── 5. 资源 ──
+    console.log('\n▸ 5. 资源');
     await check('asset.query', { pattern: 'db://assets/**' });
     await check('asset.query', { pattern: 'db://assets/**/*.prefab' });
     if (sceneUrl) {
@@ -360,8 +423,8 @@ async function main() {
         await check('asset.delete', { url: 'db://assets/__smoke_tmp2.json', confirm: true });
     }
 
-    // ── 5. 视图 / 预览 / 构建 / 参考图 ──
-    console.log('\n▸ 5. 视图 / 预览 / 构建 / 参考图');
+    // ── 6. 视图 / 预览 / 构建 / 参考图 ──
+    console.log('\n▸ 6. 视图 / 预览 / 构建 / 参考图');
     await check('view.options', {});
     await check('view.focus', { nodes: [rootName] });
     await check('view.align', { mode: 'view-with-node' });
@@ -382,8 +445,8 @@ async function main() {
         log('  ℹ️  build.start 会真的发起构建，用 --with-build 才跑');
     }
 
-    // ── 6. 编辑器 ──
-    console.log('\n▸ 6. 编辑器');
+    // ── 7. 编辑器 ──
+    console.log('\n▸ 7. 编辑器');
     await check('editor.info', {});
     await check('scene.script', { method: 'getSceneSummary', args: [], confirm: true });
     await check('scene.script', { method: '不在白名单里的方法', args: [], confirm: true }, { expectError: true });
@@ -402,55 +465,13 @@ async function main() {
     await check('project.config', { key: 'engine' });
     await check('project.config', { key: '__不存在的键__' }, { expectError: true });
 
-    // ── 7. 清理临时节点（必须在切换场景**之前**做）──
+    // ── 8. 清理临时节点 ──
     //    临时节点建在第 1 段的场景里；第 8 段会打开另一个场景，
     //    到那时这些 uuid 已经不属于当前场景，删它们只会得到「静默成功但什么都没删」。
-    console.log('\n▸ 7. 清理临时节点');
+    console.log('\n▸ 8. 清理临时节点');
     if (tempNodeUuid) await client.call('node.delete', { node: tempNodeUuid, confirm: true });
     if (tempCanvasUuid) await client.call('node.delete', { node: tempCanvasUuid, confirm: true });
 
-    // ── 8. 场景生命周期（会改当前场景，放最后）──
-    console.log('\n▸ 8. 场景生命周期');
-    // ⚠️ 场景名必须**每次唯一** ——
-    //    用固定名字会覆盖上一轮残留的同名场景，而覆盖后的资源导入状态是陈旧的，
-    //    紧接着 scene.open 就会挂起（实测 120s 超时）。
-    const sceneName = '__smoke_scene_' + Date.now().toString(36);
-    await check('scene.create', { name: sceneName, path: 'db://assets/scenes' });
-    const createdScene = await client.call('asset.query', { pattern: `db://assets/scenes/${sceneName}.scene` });
-    const cs = (createdScene.data && createdScene.data.assets) || [];
-    if (cs.length) {
-        const u = await client.call('asset.uuid', { url: cs[0].url });
-        const openRes = await check('scene.open', { uuid: u.data && u.data.uuid ? u.data.uuid : u.data });
-        if (openRes && openRes.isError) {
-            // ⚠️ 打开失败通常意味着**引擎侧的 scene 频道已经中毒** ——
-            //    后面所有场景操作都会挂。继续跑只会刷出一堆同源失败，
-            //    把「一个根因」变成「四个症状」，反而看不清问题。
-            //    这里明确停掉本段，并说明后续检查为什么没跑。
-            log('  ⚠️  scene.open 失败 → 引擎侧场景频道很可能已中毒，跳过本段剩余的场景检查');
-            log('     （save / reload / close / 根节点守卫都依赖同一个频道，跑也是超时）');
-        } else {
-            await new Promise((r) => setTimeout(r, 1800));
-            await check('scene.save', {});
-            await check('scene.reload', { confirm: true });
-            // ★ 真机验证新守卫：当前打开的场景**不能删** ——
-            //   删了会让编辑器留下指向已删除资源的引用，之后打开任何场景都会挂死。
-            await check('asset.delete', { url: cs[0].url, confirm: true }, { expectError: true });
-            // 先关闭场景，再删资源 —— 这是正确流程。
-            // ⚠️ 实测 3.8.8 在 general edit mode 下**关不掉**普通场景
-            //    （引擎返回 false 并打 “Trying to close current edit scene ...”），
-            //    所以这里不能假设它一定成功 —— 但**不能报假成功**：
-            //    引擎拒绝时必须明确说出来。
-            const closeRes = await client.call('scene.close', { confirm: true });
-            assert(
-                closeRes.isError ? /引擎拒绝关闭/.test(String(closeRes.text)) : true,
-                'scene.close 不报假成功（引擎拒绝关闭时要明确说出来）',
-                closeRes.isError ? String(closeRes.text).slice(0, 100) : '已关闭'
-            );
-            await check('asset.delete', { url: cs[0].url, confirm: true });
-        }
-    } else {
-        log('  ⚠️  scene.create 后没查到资源');
-    }
 
     // ── 9. 收尾 ──
     console.log('\n▸ 9. 收尾');
