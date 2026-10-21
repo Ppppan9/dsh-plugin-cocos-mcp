@@ -248,7 +248,9 @@ npm run test:smoke    # 全工具冒烟（67 次调用，覆盖全部 59 个工�
 | 声称「`scene.snapshot` 可编排事务回滚」 | **回滚是假的** | 实测 snapshot-abort / cancel-recording 都不回滚 → 改为自带 undo 日志（`hub/src/tools/transaction.js`） |
 | 路径护栏无法放宽 | 改不了项目外的美术资源库 | 新增 `COCOS_MCP_EXTRA_ROOTS` 环境变量，错误信息里给出用法 |
 | `COCOS_MCP_EDITOR_FILTER` 只在扩展端写、hub 端没实现 | 复制出来的配置无效 | hub 端实现过滤 |
-| `scene:open-scene` 失败时不 reject 消息 | 调用方干等到客户端超时 | Bridge 侧自己兜 60s 超时，并把「资源可能还没导入完」写进错误信息 |
+| `scene:open-scene` 失败时不 reject 消息 | 调用方干等到客户端超时 | Bridge 侧自己兜超时（单次 60s × 2 次），并把「资源可能还没导入完」写进错误信息 |
+| **一次 `open-scene` 挂死会让整个 scene 频道从此中毒**（`query-node-tree` 永远不返回，但 `bridge/ping` 正常） | 后面所有场景操作全部挂住，错误信息只是一堆没信息量的「超时」 | 加**频道健康闸门**：每次场景操作前探活，连续失败 2 次才判死，判死后立刻失败并提示「请重启 Cocos Creator」，每 30 秒给一次自愈机会 |
+| 打开一个**还没导入完**的场景 | 发出 `open-scene` → 失败 → **频道中毒** | 打开前先查本地库产物文件（`library/<xx>/<uuid>.json`）是否存在，**不导入完直接拒绝**，不碰引擎 |
 | 删根节点 / 删不存在的组件 / 删不存在的资源**返回"成功"** | 假成功比报错更危险 | 三处都改成明确拦截或明确报错 |
 | 缺少必填参数时编辑器只回一句 `parameter error` | 模型不知道是自己少传了东西 | Bridge 层前置参数校验，回中文明确错误 |
 
@@ -257,6 +259,11 @@ npm run test:smoke    # 全工具冒烟（67 次调用，覆盖全部 59 个工�
 - **`scene:snapshot` / `snapshot-abort` / `begin-recording` / `cancel-recording` 全都不回滚任何修改**，
   尽管官方 i18n 描述写着 "for undo"。→ 事务必须自己实现 undo 日志。
 - **`scene:open-scene` 失败时不 resolve 也不 reject** → 必须自己兜超时。
+- **它挂死一次，整个 scene 频道就中毒了**（`query-node-tree` 永远不返回，`bridge/ping` 却正常）→ 必须有健康闸门。
+- **打开场景实测要 26~54 秒**（资产库做 auto refresh 时引擎会等它）→ 超时设短了会把「慢但成功」误判成失败，
+  而失败后的重试是在引擎半开着的状态下继续折腾，**才真的把频道搞死**。宁可一次给足 60s。
+- **「导入完成」的可靠判据是本地库产物文件** `<项目>/library/<uuid前2位>/<uuid>.json` 是否存在；
+  `query-asset-info` 在资源刚创建时就立刻返回非空、其 `imported` 字段也是 true —— 那是假信号。
 - **`console:query` 消息不存在**，读控制台只能用 `Editor.Logger.query()`。
 - **`scene:query-classes` 的参数是 `{extends, excludeSelf}`**，传 `{}` 返回空数组。
 - **`scene:query-node-tree` 不含 `__comps__`** → 树里不能输出 `components: []`（会误导模型）。
