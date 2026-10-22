@@ -58,6 +58,21 @@ function getPath(node) {
 }
 
 /**
+ * 会写到原型链上的**保留路径段**。
+ *
+ * ⚠️ 实测（用假 cc 驱动本文件的真实实现）：
+ *    setNodeProperty(uuid, '__proto__.toString', 'PWNED')
+ *    → **Object.prototype.toString 被覆盖成字符串 "PWNED"**
+ *    → 整个编辑器进程的原型被破坏（模板字符串、String(obj) 全废）。
+ *    原因：下面那句「属性必须存在」用的是 `key in obj`，
+ *    而 `in` **会走原型链** —— 'toString' in Object.prototype === true ⇒ 守卫放行。
+ *
+ *    所以光靠「属性必须存在」挡不住 —— 必须**逐段拒绝**这些名字。
+ *    （离线编辑器的 setPath 早就修过同一类洞，这里是引擎级的另一处。）
+ */
+const RESERVED_PATH_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
  * 用引擎运行时设置属性（自动处理 Vec3 / Color / Size / 枚举等类型）。
  * @param {string} uuid
  * @param {string} path 形如 'position' / '__comps__.0._string'
@@ -82,6 +97,15 @@ METHODS.setNodeProperty = function setNodeProperty(uuid, path, value) {
     }
 
     const segments = prop.split('.');
+    // ⚠️ 逐段拒绝保留名（否则能顺着原型链写到 Object.prototype 上）
+    for (const seg of segments) {
+        if (RESERVED_PATH_SEGMENTS.has(seg)) {
+            throw new Error(
+                `属性路径 "${path}" 含保留段 "${seg}"。` +
+                '__proto__ / constructor / prototype 会写到原型链上（能污染整个编辑器进程），已拒绝。'
+            );
+        }
+    }
     let obj = target;
     for (let i = 0; i < segments.length - 1; i++) {
         obj = obj[segments[i]];
@@ -90,6 +114,10 @@ METHODS.setNodeProperty = function setNodeProperty(uuid, path, value) {
         }
     }
     const key = segments[segments.length - 1];
+    // ⚠️ 这里用 `in`（不是 hasOwnProperty）是**有意的** ——
+    //    Cocos 的节点属性（position / active / angle …）大多是**原型上的访问器**，
+    //    不是自有属性；换成 hasOwnProperty 会把正常用法全判成「属性不存在」。
+    //    原型链的风险由上面的「逐段拒绝保留名」挡住。
     if (!(key in obj) && obj[key] === undefined) {
         throw new Error(`属性 "${key}" 不存在于 ${target.constructor.name}。可用键：${Object.keys(obj).slice(0, 40).join(', ')}`);
     }
