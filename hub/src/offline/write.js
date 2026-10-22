@@ -96,6 +96,14 @@ function atomicWrite(filePath, content) {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
+  // ⚠️ 先清掉**陈旧**的临时文件 ——
+  //    进程如果正好在「写完临时文件、还没 rename」之间被杀，
+  //    就会在用户的 assets 目录里留下一个 .xxx.tmp-<pid>-<rand> 残file。
+  //    它是隐藏文件，Cocos 一般会忽略，但会污染用户的工程目录。
+  //    ⚠️ 只清**足够老**的（1 小时以上）—— 另一个进程可能正在用它写，
+  //    误删会把人家的写盘搞失败。
+  sweepStaleTmpFiles(dir, path.basename(filePath));
+
   const tmp = path.join(
     dir,
     `.${path.basename(filePath)}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`
@@ -314,6 +322,37 @@ function listFilesRecursive(dir, options) {
   }
   walk(dir, '');
   return out;
+}
+
+/** 临时文件被认为「陈旧」的时长（毫秒）。 */
+const STALE_TMP_MS = 60 * 60 * 1000;
+
+/**
+ * 清理同目录下、同一个目标文件留下的**陈旧**临时文件。
+ * @param {string} dir 目录
+ * @param {string} base 目标文件名（不含路径）
+ */
+function sweepStaleTmpFiles(dir, base) {
+    let entries = [];
+    try {
+        entries = fs.readdirSync(dir);
+    } catch (_) {
+        return;
+    }
+    const prefix = '.' + base + '.tmp-';
+    const now = Date.now();
+    for (const name of entries) {
+        if (!name.startsWith(prefix)) continue;
+        const full = path.join(dir, name);
+        try {
+            const st = fs.statSync(full);
+            if (!st.isFile()) continue;
+            if (now - st.mtimeMs < STALE_TMP_MS) continue; // 可能正被别的进程使用
+            fs.unlinkSync(full);
+        } catch (_) {
+            /* ignore */
+        }
+    }
 }
 
 module.exports = {

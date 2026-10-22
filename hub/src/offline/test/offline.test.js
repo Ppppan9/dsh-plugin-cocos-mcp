@@ -295,6 +295,30 @@ test('editPrefab 零效果 op **完全不写盘**（不重写文件、不动 mti
     assert.strictEqual(r.data.noop, true, '应标记为 noop');
 });
 
+test('editPrefab 会清理**陈旧**的临时残file，但不动可能正被使用的', () => {
+    // ⚠️ 进程在「写完临时文件、还没 rename」之间被杀，会在用户的 assets 目录里
+    //    留下 .xxx.tmp-<pid>-<rand> 残file（隐藏文件，Cocos 一般忽略，但污染工程目录）。
+    //    → 写盘前应清理**陈旧**的；但刚建的不能动（可能正被另一个进程用着）。
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    writeJson(f, makePrefab());
+
+    // 一个「很老」的残file
+    const oldTmp = path.join(dir, '.a.prefab.tmp-999999-deadbeef');
+    fs.writeFileSync(oldTmp, 'x');
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    fs.utimesSync(oldTmp, past, past);
+    // 一个「刚建」的残file
+    const freshTmp = path.join(dir, '.a.prefab.tmp-999999-cafe');
+    fs.writeFileSync(freshTmp, 'x');
+
+    const r = offline.editPrefab({ filePath: f, ops: [{ op: 'set-label-text', node: 'Child', text: 'zzz' }] });
+    assert.ok(r.ok, r.error);
+    assert.ok(!fs.existsSync(oldTmp), '陈旧的临时残file 应被清理');
+    assert.ok(fs.existsSync(freshTmp), '刚建的临时文件不能动（可能正被别的进程使用）');
+    fs.unlinkSync(freshTmp);
+});
+
 test('editPrefab dryRun 不写盘', () => {
     const dir = tmpdir();
     const f = path.join(dir, 'a.prefab');
