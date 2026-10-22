@@ -29,3 +29,6 @@ settings/mcp-server.json
 # 调研目录（参考仓库的 clone 不随本仓库分发）
 cocos-mcp-research/
 node_modules/.cache/
+
+# 编辑器/工具留下的临时副本
+*.bak
