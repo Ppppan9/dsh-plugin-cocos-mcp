@@ -27,6 +27,7 @@
  *    一边认、一边不认 → 「真机前置守卫说环境没问题，冒烟说整个频道都废了」。
  */
 const { POISON_PATTERNS, isSceneChannelUnusable } = require('./smoke-poison');
+const { EXIT } = require('./exit-codes');
 
 /**
  * 探一次场景频道。
@@ -76,7 +77,10 @@ async function requireSceneChannel(callTool, scriptName) {
     console.error(`❌ ${scriptName} 无法继续：${p.reason}`);
     console.error('   （这不算本项目的失败 —— 是环境/引擎的问题。修好环境后重跑即可。）');
     console.error('');
-    process.exit(2);
+    // ⚠️ 用退出码词汇表 —— 2 在别处表示「有跳过、本轮没跑完」，
+    //    这里表示「环境不可用」也是同一类语义，但**必须用同一张表**，
+    //    否则 CI 读不出这个码是什么意思。
+    process.exit(EXIT.INCOMPLETE);
     return false;
 }
 

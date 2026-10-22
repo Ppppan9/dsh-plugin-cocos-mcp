@@ -45,7 +45,10 @@ test('★ 语义分层不能错：失败 / 没跑完 / 残留 / 崩溃 必须分
 });
 
 test('★ 各真机脚本必须用这张表，不许自己写退出码', () => {
-    const FILES = ['test/tool-smoke.js', 'test/e2e.js', 'test/real-behavior.test.js'];
+    // ⚠️ editor-health.js 也要在列表里 ——
+    //    它自己也会 process.exit（真机前置守卫），
+    //    不管的话它的退出码就成了「谁都不管」的黑洞。
+    const FILES = ['test/tool-smoke.js', 'test/e2e.js', 'test/real-behavior.test.js', 'test/editor-health.js'];
     for (const f of FILES) {
         const src = read(f);
         assert.match(src, /require\('\.\/exit-codes'\)/, `${f} 没有引用退出码词汇表`);
