@@ -322,6 +322,22 @@ function editPrefab(args) {
         }
 
         // 4) 提交：.meta 先行，主文件最后；中途失败自动回滚
+        //
+        // ⚠️ **没有任何实际改动时不要写盘** ——
+        //    写盘不只是「多一次 I/O」：它会走一遍「写临时文件 → rename 覆盖」，
+        //    期间原文件是**被替换过**的（进程此刻被杀就可能留下残file），
+        //    而且 mtime 变了会让编辑器/构建系统以为资源变了。
+        //    零效果的 op（例如把节点名改成它本来的名字）应该**什么都不做**。
+        if (allChanges.length === 0) {
+            return ok({
+                filePath,
+                changed: 0,
+                diff: [],
+                steps: results,
+                written: [],
+                noop: true,
+            });
+        }
         const plans = ctx.metaPlans.slice();
         plans.push({
             path: filePath,

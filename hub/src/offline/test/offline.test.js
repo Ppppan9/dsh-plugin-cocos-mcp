@@ -271,6 +271,30 @@ test('editPrefab 修改文本并落盘', () => {
     assert.ok(label, '磁盘文件应包含新文本');
 });
 
+test('editPrefab 零效果 op **完全不写盘**（不重写文件、不动 mtime）', () => {
+    // ⚠️ 写盘不只是「多一次 I/O」：它走「写临时文件 → rename 覆盖」，
+    //    期间原文件是**被替换过**的（进程此刻被杀就可能留下残file），
+    //    而且 mtime 变了会让编辑器/构建系统以为资源变了。
+    //    零效果的 op（比如把名字改成它本来的名字）应该什么都不做。
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    writeJson(f, makePrefab());
+    const before = fs.readFileSync(f, 'utf8');
+    // ⚠️ 先把 mtime 拨到过去（这样「写盘前后」的差异一眼能看出来），再取基准值
+    const past = new Date(Date.now() - 5000);
+    fs.utimesSync(f, past, past);
+    const mtime0 = fs.statSync(f).mtimeMs;
+
+    // 'child text' 就是夹具里的原值 → 零效果
+    const r = offline.editPrefab({ filePath: f, ops: [{ op: 'set-label-text', node: 'Child', text: 'child text' }] });
+    assert.ok(r.ok, r.error);
+    assert.strictEqual(r.data.changed, 0, '零效果 op 的 changed 应为 0');
+    assert.deepStrictEqual(r.data.written, [], '零效果 op 不该写任何文件');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, '内容必须不变');
+    assert.strictEqual(fs.statSync(f).mtimeMs, mtime0, 'mtime 不该变（= 真的没写盘）');
+    assert.strictEqual(r.data.noop, true, '应标记为 noop');
+});
+
 test('editPrefab dryRun 不写盘', () => {
     const dir = tmpdir();
     const f = path.join(dir, 'a.prefab');
