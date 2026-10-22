@@ -18,7 +18,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { POISON_PATTERNS, poisonReason, isSceneChannelUnusable } = require('./smoke-poison');
+const { POISON_PATTERNS, poisonReason, isSceneChannelUnusable, isTimeoutText, isSceneChannelTool } = require('./smoke-poison');
 
 test('★ 两条特征的判据都命中，而且理由**必须不同**', () => {
     const transient = poisonReason('场景频道**暂时无响应**（健康检查失败：…）');
@@ -104,4 +104,26 @@ test('★ 判据只能有**一份**定义（两份各写一份迟早漂移）', 
     // 并且 editor-health 必须**引用**共享模块，而不是自己抄一份
     const eh = fs.readFileSync(path.join(dir, 'editor-health.js'), 'utf8');
     assert.match(eh, /require\('\.\/smoke-poison'\)/, 'editor-health.js 必须引用共享判据模块');
+});
+
+// ─────────────────── 超时的判定（第 11 轮复审带出来的） ───────────────────
+// ⚠️ 背景：引擎挂死时，冒烟脚本有时收到健康闸门那两句特征（⇒ 记成「跳过」），
+//    有时收到的是「请求超时（150000ms）」（⇒ 认不出来，被记成「**真失败**」）。
+//    同一个引擎挂死，两种记法 —— 报告不准，人看到「失败」就会去查自己的代码。
+//    ⇒ 超时也要能被识别，但**必须再用探针确认**（见 tool-smoke.js 的 check()）。
+
+test('★ 超时能被认出来（它是引擎挂死最常见的表现）', () => {
+    assert.ok(isTimeoutText('请求超时（150000ms）'), '★ 客户端超时必须被认出');
+    assert.ok(isTimeoutText('编辑器消息 "scene:open-scene" 超时（90000ms 未返回）。'), '★ 引擎侧超时也要被认出');
+    assert.ok(!isTimeoutText('没有组件 "cc.Nope" 的属性表。'), '普通错误不是超时');
+    assert.ok(!isTimeoutText(''), '空文本不是超时');
+});
+
+test('★ 只有走 scene 频道的工具，超时才算「引擎挂死」（其它频道挂了不是它）', () => {
+    for (const t of ['scene.tree', 'scene.open', 'node.create', 'component.add']) {
+        assert.ok(isSceneChannelTool(t), `★ ${t} 走 scene 频道`);
+    }
+    for (const t of ['asset.query', 'preferences.get', 'editor.logs', 'build.platforms']) {
+        assert.ok(!isSceneChannelTool(t), `★ ${t} 不走 scene 频道`);
+    }
 });

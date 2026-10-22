@@ -34,7 +34,7 @@ const os = require('os');
 
 const HUB = path.join(__dirname, '..', 'hub', 'bin.js');
 const { exitCodeFor } = require('./smoke-exit');
-const { poisonReason } = require('./smoke-poison');
+const { poisonReason, isTimeoutText, isSceneChannelTool } = require('./smoke-poison');
 const { cleanupVerdict } = require('./smoke-cleanup');
 const { makeFakeClient } = require('./fake-mcp-client');
 const AS_JSON = process.argv.includes('--json');
@@ -208,7 +208,24 @@ async function check(name, args, opts = {}) {
     //    把它们算作「失败」，等于把「一个根因」变成「几十个症状」——
     //    既看不清问题，也会让冒烟测试的红绿失去意义（真正的回归会被淹没）。
     //    这里只认精确特征，所以真正的回归仍然是失败。
-    const hit = rejected ? poisonReason(r.text) : null;
+    let hit = rejected ? poisonReason(r.text) : null;
+    // ⚠️ **超时**也是一种「频道不可用」的形态，但它的文案是
+    //    「请求超时（150000ms）」，**不含**健康闸门的那两句特征
+    //    ⇒ 光靠特征匹配认不出来 ⇒ 同一个引擎挂死，
+    //    有时记成「跳过」、有时记成「失败」（实测两轮冒烟各出现过一次）。
+    //    ⇒ 认不出来时**主动探一次**：
+    //      探针用闸门自己用的那条（query-dirty），
+    //      探针说「频道已经死了/暂时无响应」⇒ 这就是引擎挂死 ⇒ 记成跳过；
+    //      探针说频道还活着 ⇒ 那只是一次偶发超时 ⇒ **仍然算真失败**。
+    //    ⚠️ 这样是「确认」而不是「假定」：不会把真 bug 一起吞掉。
+    if (!hit && rejected && isTimeoutText(r.text) && isSceneChannelTool(name)) {
+        const probe = await client.call('scene.dirty', {});
+        const ph = probe && probe.isError ? poisonReason(probe.text) : null;
+        if (ph) {
+            log(`  ℹ️  ${name} 超时；探针确认 scene 频道已不可用（${firstLine(probe.text).slice(0, 60)}）`);
+            hit = ph;
+        }
+    }
     if (hit) {
         const reason = hit.reason;
         results.push({ name, status: 'skip', ms, detail: firstLine(r.text), reason });

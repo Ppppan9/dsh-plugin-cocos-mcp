@@ -48,4 +48,33 @@ function isSceneChannelUnusable(text) {
     return poisonReason(text) !== null;
 }
 
-module.exports = { POISON_PATTERNS, poisonReason, isSceneChannelUnusable };
+/**
+ * 错误文本是不是「超时」。
+ *
+ * ⚠️ 认的是「超时」这一个**形态**，不是泛泛的失败 ——
+ *    「超时」正是引擎挂死时最常见的表现（客户端等不到回应），
+ *    但它也可能来自别的原因，所以**不能只凭这一条**就判成引擎缺陷
+ *    （必须再用探针确认，见冒烟脚本里的用法）。
+ */
+function isTimeoutText(text) {
+    return /超时/.test(String(text || ''));
+}
+
+/**
+ * 这个工具是不是走 **scene 频道**（引擎挂死时整条频道都不响应）。
+ *
+ * ⚠️ 这几个前缀是按扩展端的实现列的：
+ *    `scene.*` 直接用 scene 频道，`node.*` / `component.*` 也经由它。
+ *    其它频道（asset-db / preferences / …）挂了**不是**这个引擎缺陷。
+ */
+function isSceneChannelTool(name) {
+    return /^(scene|node|component)\./.test(String(name || ''));
+}
+
+module.exports = {
+    POISON_PATTERNS,
+    poisonReason,
+    isSceneChannelUnusable,
+    isTimeoutText,
+    isSceneChannelTool,
+};
