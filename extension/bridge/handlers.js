@@ -593,6 +593,15 @@ const NOT_ASSET_PATH_FIELDS = {
     'asset.users.url': '只作为 key 查引用者',
     'asset.reimport.url': '只触发引擎按 key 重新导入，不会创建/写入文件',
     'asset.refresh.url': '只触发引擎按 key 刷新，不会创建/写入文件',
+    'asset.query.pattern': '查询通配符（glob），不是路径 —— 传给引擎的 asset-db:query-assets',
+    // ⚠️ 这两个是**有意指向项目外**的：参考图就是外部素材，
+    //    业务上必须能引用磁盘上任意位置的图片。
+    //    ⇒ 不能加 db://assets/ 护栏（会把功能改坏），改成**显式豁免 + 写明理由**。
+    //    ⚠️ 残留面（知情取舍，不是遗漏）：扩展端会对这些路径跑 fs.existsSync，
+    //    等于给模型一个「这个文件存不存在」的存在性预言机。
+    //    换来的是「参考图可以来自任意本地路径」这个核心能力。
+    'reference.add.paths': '参考图按业务需要指向**项目外**的本地图片；只做存在性探测，不写入项目',
+    'reference.remove.paths': '同上（移除参考图）；只把路径原样转给引擎，不碰文件系统',
 };
 
 function createHandlers(ctx) {

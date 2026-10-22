@@ -19,6 +19,7 @@ const assert = require('node:assert');
 
 const { createHandlers, ASSET_PATH_FIELDS, NOT_ASSET_PATH_FIELDS } = require('../../extension/bridge/handlers');
 const { EDITOR_TOOLS } = require('../src/tools/editor-tools');
+const { fieldsOfSchema } = require('../src/util/path-fields');
 
 /**
  * 「带路径字段的扩展端 op」—— **从 hub 侧工具表结构化推导**。
@@ -28,18 +29,40 @@ const { EDITOR_TOOLS } = require('../src/tools/editor-tools');
  *    带 `handler` 的是 **hub 侧合成工具**（自己不动引擎，转手调扩展端 op）。
  *    后者的路径参数最终会流到扩展端 op，由那边的护栏接管，
  *    在这一层再单独立一份口径 = 两份真相。
+ *
+ * ⚠️ 判定口径来自**共享模块** `hub/src/util/path-fields`（全仓库唯一一份）：
+ *    这里曾经自己写了一套「精确匹配 9 个词」的**窄**口径，
+ *    与离线层的「子串匹配」宽口径漂移 ——
+ *    结果 `srcPath` / `paths` 这类字段**根本进不了推导范围**，
+ *    护栏对它们**静默不存在**，而全套测试一片绿
+ *    （第 11 轮复审 H-1 实测：越界路径原样直达引擎）。
+ *    ⇒ 「什么算路径」只能有一份。
  */
-const PATHISH_FIELD = /^(url|from|to|path|file|dir|folder|uri)$/;
-
 function pathishFieldsByOp() {
     const map = new Map();
     for (const t of EDITOR_TOOLS) {
-        if (!t.op) continue; // hub 侧合成工具，不在这一层的口径里
-        const props = (t.inputSchema && t.inputSchema.properties) || {};
-        const fields = Object.keys(props).filter(
-            (f) => PATHISH_FIELD.test(f) && props[f] && props[f].type === 'string'
-        );
-        if (fields.length) map.set(t.op, fields);
+        if (!t.op) continue;
+        const { pathish } = fieldsOfSchema(t.inputSchema);
+        if (pathish.length) map.set(t.op, pathish);
+    }
+    return map;
+}
+
+/**
+ * 每个扩展端 op 的**全部**字符串类字段（含数组）。
+ *
+ * ⚠️ 用途是**反向核对**：两张表里的每一项都必须指向一个**真实存在**的字段，
+ *    否则就是拼错了名字 → 护栏永远不会被触发 = 空转。
+ *    （这里刻意用「全部字符串字段」而不是「路径字段」——
+ *      豁免表里可以显式声明一个**不是**路径词的字段，
+ *      比如 `asset.query.pattern`（查询通配符），
+ *      让「它是有意豁免的」变成显式表态，而不是压根没人看见。）
+ */
+function stringFieldsByOp() {
+    const map = new Map();
+    for (const t of EDITOR_TOOLS) {
+        if (!t.op) continue;
+        map.set(t.op, fieldsOfSchema(t.inputSchema).strings);
     }
     return map;
 }
@@ -220,15 +243,15 @@ test('★ 两张表必须覆盖所有「带路径字段的扩展端 op」（漏�
 
     // ② 反向：两张表里的每一项都必须真的存在于工具表里
     //    （拼错的名字 = 护栏永远不会被触发 = 空转）
-    const universe = pathishFieldsByOp();
+    const real = stringFieldsByOp();
     for (const key of declared.keys()) {
         const dot = key.lastIndexOf('.');
         const op = key.slice(0, dot);
         const field = key.slice(dot + 1);
-        assert.ok(universe.has(op), `★ ${key} 的 op "${op}" 不在工具表里（拼错了？）`);
+        assert.ok(real.has(op), `★ ${key} 的 op "${op}" 不在工具表里（拼错了？）`);
         assert.ok(
-            universe.get(op).includes(field),
-            `★ ${key} 的字段 "${field}" 不是 ${op} 的路径字段（拼错了？）`
+            (real.get(op) || []).includes(field),
+            `★ ${key} 的字段 "${field}" 不是 ${op} 的字符串类字段（拼错了？）`
         );
     }
 });

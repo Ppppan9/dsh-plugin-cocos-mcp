@@ -31,11 +31,18 @@ const { OP_DEFS, NOT_PATH_FIELDS } = require('../src/offline/ops');
 const { ANIM_OP_DEFS } = require('../src/offline/anim');
 const offline = require('../src/offline/index');
 const { GLOBAL_TOOLS, OP_PATH_FIELDS } = require('../src/tools/global-tools');
+const { isPathishField } = require('../src/util/path-fields');
 
-/** 字段名里带这些词，就当作「路径类字段」。 */
-// ⚠️ 正则要覆盖将来可能出现的路径类字段名 ——
-//    命中不了的靠「二选一」也兜不住（那只会强制表态，不会自动拦）。
-const PATHISH = /path|file|url|dir|prefab|asset|folder|uri/i;
+/**
+ * 字段名里带这些词，就当作「路径类字段」。
+ *
+ * ⚠️ 判定口径**不在本文件里写死** —— 统一 require `hub/src/util/path-fields`。
+ *    原因（第 11 轮复审 H-1 实测）：扩展端一度自己写了一套「精确匹配 9 个词」的
+ *    窄口径，与这里的宽口径漂移 ⇒ 有一整类字段（srcPath / paths …）
+ *    **进不了推导范围**，护栏对它们静默不存在，而 CI 全绿。
+ *    ⇒ 「什么算路径」必须是**全仓库唯一一份**。
+ */
+const PATHISH = { test: (n) => isPathishField(n) };
 
 function tmpdir() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'cocos-mcp-opfields-'));
