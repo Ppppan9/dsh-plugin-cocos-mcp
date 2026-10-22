@@ -1,0 +1,52 @@
+name: CI
+
+# ⚠️ 为什么用 macos-latest 而不是 ubuntu ——
+#    本仓库面向 **macOS 上的 Cocos Creator**，而 CI 环境一旦与本地验证过的
+#    平台不一致，就有「一上去就红」的风险 —— 而**常态红的信号等于没有信号**
+#    （比没有 CI 更糟）。这里只放**本地实测跑通**的配置。
+#    单元测试全是纯 Node（零第三方依赖、路径一律走 path.join / os.tmpdir），
+#    不需要装 Cocos Creator。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: 单测 + 静态检查 (Node ${{ matrix.node }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # ⚠️ 只放**实测跑通**的 Node 版本。
+        #    package.json 声明 engines>=18（hub 运行时的下限），
+        #    但没有实测过的版本不进矩阵 —— 见上面的说明。
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # ⚠️ **不要**加 `npm ci` —— 本项目零依赖且**没有锁文件**，
+      #    npm ci 在没有 package-lock.json 时会直接失败。
+      #    需要装依赖时，请先在本机生成并提交 package-lock.json。
+      - name: 单测
+        run: npm test
+
+      - name: 静态检查（schema 一致 / 重复 key / README 清单）
+        run: |
+          node scripts/check-schema-args.js
+          node scripts/check-dup-schema-keys.js
+          node scripts/gen-readme-tools.js --check
+
+      # ⚠️ 真机三层（e2e / 真机行为 / 全工具冒烟）**不在 CI 里跑** ——
+      #    它们要开着 Cocos Creator 3.8.8，而 CI 上没有。
+      #    冒烟测试的退出码语义见 README（0 通过 / 1 真失败 / 2 没跑完 /
+      #    3 残留 / 4 崩溃），需要时在本地跑 npm run test:smoke。
