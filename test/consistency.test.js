@@ -550,6 +550,40 @@ test('★ 扩展端实际发出的每个消息都必须在 3.8.8 契约里', () 
         while ((m = re.exec(src))) used.set(`${m[1]}:${m[2]}`, (used.get(`${m[1]}:${m[2]}`) || 0) + 1);
     }
     assert.ok(used.size >= 40, `应该扫到不少消息调用，实际只扫到 ${used.size} 个`);
+
+    // ⚠️ **不能用变量拼出来的消息名** ——
+    //    上面的正则只认字面量；`send(ch, msg)` 这种写法会被**整条漏掉**，
+    //    于是「契约检查通过」是**假象**（那一条调用根本没被查）。
+    //    ⇒ 把所有非字面量的调用抓出来，而不是默默放过。
+    //
+    //    唯一的例外是 `cocos_message` 的**透传**路径（channel/message 来自用户）——
+    //    它靠**运行时**的白名单把关：send() 内部第一件事就是 verify()。
+    //    所以这里要求：透传路径上必须真的有 verify(args.channel, args.message)。
+    const hasRuntimeWhitelist = /verify\(\s*args\.channel\s*,\s*args\.message\s*\)/.test(src);
+    const dynamic = [];
+    for (const m of src.matchAll(/\bsend\s*\(/g)) {
+        const tail = src.slice(m.index + m[0].length, m.index + m[0].length + 160);
+        // ⚠️ 必须**两个参数都是字面量**才算「已扫到」——
+        //    只看第一个参数会漏掉「频道是字面量、消息名是变量」这种
+        //    （那正是最容易在重构时被写出来的形状）。
+        if (/^\s*'[^']*'\s*,\s*'[^']*'/.test(tail)) continue;
+        if (/^\s*\)/.test(tail)) continue;        // 无参调用（不可能，但别误报）
+        if (/^\s*channel\s*,\s*message/.test(tail)) continue;  // 函数定义本身
+        if (/^\s*args\.channel\s*,\s*args\.message/.test(tail)) {
+            // 透传路径 —— 靠运行时 verify() 把关
+            assert.ok(
+                hasRuntimeWhitelist,
+                'cocos_message 的透传路径必须有运行时的 verify(args.channel, args.message) 把关'
+            );
+            continue;
+        }
+        dynamic.push(tail.split('\n')[0].slice(0, 60));
+    }
+    assert.deepStrictEqual(
+        dynamic,
+        [],
+        `这些 send() 调用不是字面量，静态契约检查覆盖不到：\n  ${dynamic.join('\n  ')}`
+    );
     const bad = [];
     for (const key of used.keys()) {
         const i = key.indexOf(':');
