@@ -63,7 +63,7 @@ class EditorClient {
         let res;
         let raw;
         try {
-            res = await this._request(body, timeoutMs);
+            res = await this._request(body, timeoutMs, opts);
             raw = res.body;
         } catch (err) {
             if (err instanceof BridgeError) throw err;
@@ -105,10 +105,11 @@ class EditorClient {
         return JSON.parse(res.body).result;
     }
 
-    _request(body, timeoutMs) {
+    _request(body, timeoutMs, opts = {}) {
         return new Promise((resolve, reject) => {
             const u = new URL(this.url);
-            const limit = MAX_RESPONSE_BYTES;
+            // ⚠️ 可配置（测试与特殊场景用）—— 默认仍是 64MB 上限。
+            const limit = opts.maxResponseBytes || MAX_RESPONSE_BYTES;
             const req = http.request(
                 {
                     hostname: u.hostname,
@@ -130,13 +131,18 @@ class EditorClient {
                         // 响应体无上限地全量拼进内存 → 大场景的 scene.tree / 大库的 asset.query
                         // 能把 hub 的内存吃光。超限就断开并报错。
                         if (size > limit) {
-                            req.destroy(
-                                new BridgeError(
-                                    `编辑器响应超过 ${Math.round(limit / 1048576)}MB 上限（已收 ${size} 字节），已中止。` +
-                                    '试试缩小查询范围（如给 scene.tree 加 maxDepth）。',
-                                    'RESPONSE_TOO_LARGE'
-                                )
+                            const err = new BridgeError(
+                                `编辑器响应超过 ${Math.round(limit / 1048576)}MB 上限（已收 ${size} 字节），已中止。` +
+                                '试试缩小查询范围（如给 scene.tree 加 maxDepth）。',
+                                'RESPONSE_TOO_LARGE'
                             );
+                            // ⚠️ **显式 reject**，不要只靠 req.destroy(err) 触发 'error' 事件 ——
+                            //    响应**已经开始流式返回**时，那个事件还派不派发到 req 上并不确定；
+                            //    不确定就可能留下一个**悬挂的 promise** ——
+                            //    调用方既等不到结果、也不会超时（外层的超时只管 socket，不管 promise）。
+                            reject(err);
+                            res.destroy();
+                            req.destroy();
                             return;
                         }
                         chunks.push(c);
