@@ -413,8 +413,17 @@ const GLOBAL_TOOLS = [
         handler: async (args, ctx) => {
             const offline = requireOffline();
             const filePath = assertInsideProject(ctx, args.filePath, 'anim 路径');
+            // ⚠️ 必须传 allowedRoots —— 离线层自己的「anim 路径」护栏
+            //    只在拿到 allowedRoots 时才生效；不传就等于**那道护栏是死的**
+            //    （看着有、其实没有）。传了它语义完全等价：
+            //    两边用的是同一个 isInsideAnyRoot 实现，同一批 projectRoots。
             return unwrapOffline(
-                offline.editAnimation({ filePath, ops: args.ops, dryRun: !!args.dryRun }),
+                offline.editAnimation({
+                    filePath,
+                    ops: args.ops,
+                    dryRun: !!args.dryRun,
+                    allowedRoots: projectRoots(ctx),
+                }),
                 'cocos_anim_batch'
             );
         },
