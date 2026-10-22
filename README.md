@@ -228,7 +228,7 @@ npm run test:real     # 真机行为验证（把「必须真机才能定论」�
 
 | 层 | 脚本 | 覆盖 | 最近一次实测 |
 |---|---|---|---|
-| 单测 | `hub/test/` + `hub/src/offline/test/` + `test/consistency.test.js` + `test/handler-smoke.test.js` + `test/smoke-exit.test.js` | 离线 prefab/anim 读写、事务 undo 日志、文档/清单一致性、**逐个调用全部 Bridge op**、场景频道健康闸门、**原型链守卫**、**批量两阶段提交**、**护栏接线** | **161/161** |
+| 单测 | `hub/test/` + `hub/src/offline/test/` + `test/consistency.test.js` + `test/handler-smoke.test.js` + `test/smoke-exit.test.js` | 离线 prefab/anim 读写、事务 undo 日志、文档/清单一致性、**逐个调用全部 Bridge op**、场景频道健康闸门、**原型链守卫**、**批量两阶段提交**、**护栏接线** | **162/162** |
 | 端到端 | `test/e2e.js` | MCP 握手 → 工具面 → 真实读取 → **真实写入闭环** → **事务失败真回滚** → 安全护栏 → Resources → 离线能力 → 路径护栏 → 多编辑器前缀隔离 | **60/60** |
 | 全工具冒烟 | `test/tool-smoke.js` | **每一个**工具都真跑一遍 + 工具面静态自检 | 覆盖全部 70 个工具；**退出码 0=全通过 / 1=有真失败 / 2=有跳过（本轮没跑完）**（引擎缺陷导致的跳过单独列出，不冒充通过） |
 | 真机行为 | `test/real-behavior.test.js` | 把「代码看不出对错、必须真机才能定论」的条目逐条跑清楚：剪切→粘贴闭环、组件真被摘掉、越界写被拦、20 并发、事务回滚、**未导入场景前置拦截**、**离线写盘事务** | **53/53** |

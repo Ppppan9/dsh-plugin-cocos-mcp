@@ -163,7 +163,20 @@ function applyOffset(value, offset, axis) {
 
 /* -------------------------------------------------------------- handlers */
 
+/** 合法的轴。 */
+const VALID_AXES = ['x', 'y', 'z'];
+
 function handleOffsetCurve(ctx, op) {
+  // ⚠️ axis 写错（"X" / "xx" / "foo"）时，applyOffset 一个轴都不会命中，
+  //    结果是「什么都没改」——工具报 changed:0、磁盘不写，
+  //    看起来是安全的，但调用方（尤其是模型）很可能把「changed:0」当成
+  //    「已经改过了别的通道」。**假成功比报错更危险** → 直接拒绝。
+  if (op.axis !== undefined && op.axis !== null && !VALID_AXES.includes(String(op.axis))) {
+    throw new Error(
+      `offset-curve 的 axis "${op.axis}" 不是合法的轴名，只能是 ${VALID_AXES.join(' / ')}。` +
+      '（传错轴名会一个轴都命不中 → 什么都不改。与其静默无效，不如直接报错。）'
+    );
+  }
   const changes = [];
   const channels = selectChannels(ctx, op.path);
   if (!channels.length) {

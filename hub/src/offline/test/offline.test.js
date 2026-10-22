@@ -1193,3 +1193,27 @@ test('真实 .anim 的批量编辑：2 个 op 都要成功，且值真的落进�
     assert.ok(real, '应还能找到 cc.RealCurve');
     assert.strictEqual(real._values[0].value, 0.25, '关键帧的值必须真的写进文件（不是只改了副本）');
 });
+
+test('★ offset-curve 的 axis 传错必须报错（不能静默变成零效果）', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.anim');
+    writeJson(f, makeRealAnim());
+    const before = fs.readFileSync(f, 'utf8');
+    // "xx" / "foo" / 大写 "X" 都应该被拒 ——
+    // 放过去的话一个轴都命不中，工具报 changed:0 但调用方可能当成「改过了」。
+    for (const axis of ['xx', 'foo', 'X', '__proto__']) {
+        const r = offline.editAnimation({
+            filePath: f,
+            ops: [{ op: 'offset-curve', path: 'Root/Child', offset: 5, axis }],
+        });
+        assert.strictEqual(r.ok, false, `axis="${axis}" 必须被拒绝`);
+        assert.match(r.error, /不是合法的轴名/, r.error);
+    }
+    // 合法轴仍然正常工作
+    const ok = offline.editAnimation({
+        filePath: f,
+        ops: [{ op: 'offset-curve', path: 'Root/Child', offset: 5, axis: 'x' }],
+    });
+    assert.ok(ok.ok, ok.error);
+    assert.ok(ok.data.changed > 0, '★ 合法轴必须真的改到东西');
+});
