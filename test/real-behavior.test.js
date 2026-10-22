@@ -12,6 +12,7 @@
  */
 
 const { spawn } = require('child_process');
+const { requireSceneChannel } = require('./editor-health');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -171,6 +172,12 @@ async function main() {
         );
         process.exit(2);
     }
+
+    // ⚠️ 前置：场景频道必须是活的 ——
+    //    引擎的 open-scene 挂死会毒死整个 scene 频道且再也回不来
+    //    （调研报告 6.8 / 6.11 / 6.14）。那种状态下继续跑，
+    //    得到的是一堆同源失败，看起来像回归，其实是环境坏了。
+    await requireSceneChannel((n, a) => c.call(n, a), '真机行为验证');
 
     const marker = 'RB' + Date.now().toString(36);
 

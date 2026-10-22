@@ -23,6 +23,7 @@ const fs = require('fs');
 const os = require('os');
 
 const HUB = path.join(__dirname, '..', 'hub', 'bin.js');
+const { requireSceneChannel } = require('./editor-health');
 const KEEP_SCENE = process.argv.includes('--keep-scene');
 
 let pass = 0;
@@ -200,6 +201,13 @@ async function main() {
     const cleanup = [];
 
     try {
+        // ⚠️ 前置：场景频道必须是活的 ——
+        //    引擎的 open-scene 挂死会毒死整个 scene 频道且再也回不来
+        //    （调研报告 6.8 / 6.11 / 6.14）。那种状态下继续跑，
+        //    得到的是一堆同源失败，甚至直接崩在某个 `.find` 上，
+        //    报出来的错跟真实原因无关 —— 看着像回归，其实是环境坏了。
+        await requireSceneChannel((n, a) => client.callTool(n, a), '端到端验证');
+
         // ── 1. MCP 握手 ─────────────────────────────────────────
         section('1. MCP 协议握手');
         const init = await client.request('initialize', {
@@ -387,7 +395,8 @@ async function main() {
             '★ 回滚后节点数与事务前一致（无残留）',
             `事务前 ${countBefore} → 事务后 ${countAfter}`
         );
-        const leftover = afterTx.data && afterTx.data.nodes.find((n) => n.name === '__TX_OK__');
+        // ⚠️ nodes 也可能是 undefined —— 频道中毒时 scene.tree 会返回残缺的数据
+        const leftover = afterTx.data && afterTx.data.nodes && afterTx.data.nodes.find((n) => n.name === '__TX_OK__');
         assert(!leftover, '★ 事务里第一步建的节点也被回滚掉了');
 
         // ── 5. 安全护栏 ─────────────────────────────────────────
