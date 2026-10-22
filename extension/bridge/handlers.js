@@ -185,9 +185,10 @@ const treeCache = new Map(); // ctx 无关，全进程一份（编辑器主进�
  * 这道闸门把「沉默地干等」变成「立刻失败 + 可行动的提示」。
  */
 const SCENE_DEAD_HINT =
-    'Cocos 的场景频道已经卡死（引擎侧 open-scene 挂死后，场景状态查询不再回应）。' +
-    '所有场景操作都会失败。请重启 Cocos Creator（或在扩展面板点「重启 Bridge」清掉闸门状态），' +
-    '期间可以改用离线 prefab/animation 编辑器。';
+    'Cocos 的场景频道已经卡死（场景状态查询不再回应）。所有场景操作都会失败。' +
+    '请**重启 Cocos Creator** —— 扩展面板的「重启 Bridge」只清掉我们这边的闸门状态，' +
+    '清不掉引擎侧卡住的状态（点了也没用）。' +
+    '重启之前可以继续用离线 prefab/animation 编辑器。';
 
 /** @type {{dead: boolean, failures: number, lastProbeAt: number, lastProbeError: string|null}} */
 const sceneHealth = { dead: false, failures: 0, lastProbeAt: 0, lastProbeError: null };
@@ -311,12 +312,43 @@ async function assertSceneChannelAlive(ctx) {
         throw unhealthyError(res.error);
     }
     sceneHealth.dead = true;
-    const err = new Error(`场景频道不可用：${SCENE_DEAD_HINT}（健康检查失败：${res.error}）`);
+    // 分清「编辑器完全没反应」和「编辑器活着、只是场景状态查询坏了」——
+    // 后者更常见（实测中毒时 query-is-ready 仍然 3ms 正常返回），
+    // 处置方式不一样，提示必须说准。
+    const diag = await diagnoseEditorAlive(ctx);
+    const err = new Error(
+        `场景频道不可用：${SCENE_DEAD_HINT}` +
+        `（健康检查失败：${res.error}；` +
+        (diag.alive
+            ? '补充诊断：**编辑器本身还活着**（scene:query-is-ready 正常），坏掉的是场景状态查询这一路。'
+            : '补充诊断：编辑器**完全无响应**。') +
+        '）'
+    );
     err.code = 'SCENE_CHANNEL_DEAD';
     throw err;
 }
 
-/** 探活失败但还没到判死门槛时的错误。 */
+/**
+ * 探活失败后，再分一层：编辑器**完全没反应**，还是**活着但场景状态查询卡住**？
+ *
+ * ⚠️ 实测：场景频道中毒后，`scene:query-is-ready` **3ms 就正常返回**，
+ *    而 `query-dirty` / `query-node-tree` 永久挂起 ——
+ *    也就是**编辑器进程是活的**，只是场景状态查询这条路坏了。
+ *    这两种情况的处置完全不同：
+ *      - 编辑器完全无响应 → 可能是崩了/卡死了 → 重启 Cocos Creator；
+ *      - 编辑器活着、只是场景查询坏了 → 也得重启（场景进程要重载），
+ *        但至少用户知道「不是整个编辑器挂了」。
+ */
+async function diagnoseEditorAlive(ctx) {
+    try {
+        await sendWithTimeout(ctx, 'scene', 'query-is-ready', [], 3000, '（诊断用）');
+        return { alive: true };
+    } catch (_) {
+        return { alive: false };
+    }
+}
+
+/** 探活失败但编辑器其实还活着时的错误。 */
 function unhealthyError(reason) {
     const err = new Error(
         `场景频道响应异常（健康检查失败：${reason}）。` +
