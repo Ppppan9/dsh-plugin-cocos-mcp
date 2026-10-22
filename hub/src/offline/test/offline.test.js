@@ -1209,6 +1209,18 @@ test('★ offset-curve 的 axis 传错必须报错（不能静默变成零效果
         assert.strictEqual(r.ok, false, `axis="${axis}" 必须被拒绝`);
         assert.match(r.error, /不是合法的轴名/, r.error);
     }
+    // ⚠️ **非字符串**的 axis 必须被拒 ——
+    //    `["x"]` / `{toString: () => 'x'}` 会被 String() 强制转换成 "x"，
+    //    如果只校验 `VALID_AXES.includes(String(op.axis))` 就能骗过去，
+    //    但 applyOffset 用的是原始值 → 一个轴都命不中 → 又是零效果。
+    for (const axis of [['x'], { toString: () => 'x' }, 0, true]) {
+        const r = offline.editAnimation({
+            filePath: f,
+            ops: [{ op: 'offset-curve', path: 'Root/Child', offset: 5, axis }],
+        });
+        assert.strictEqual(r.ok, false, `axis=${JSON.stringify(axis)} 必须被拒绝`);
+        assert.match(r.error, /必须是字符串/, r.error);
+    }
     // 合法轴仍然正常工作
     const ok = offline.editAnimation({
         filePath: f,

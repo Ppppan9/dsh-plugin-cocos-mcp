@@ -37,26 +37,37 @@ function runSmokeExit(failed, skipped, leftover) {
         [SMOKE, `--selftest-exit=${failed},${skipped},${leftover}`],
         { encoding: 'utf8', timeout: 30000 }
     );
-    return r.status;
+    return r;
 }
 
 test('★ 冒烟脚本真的用上了退出码函数（接线没断）', () => {
     // 这组断言是**执行**出来的 —— 不是读源码、不是测纯函数。
-    assert.strictEqual(runSmokeExit(0, 0, 0), 0, '全部通过 → 0');
-    assert.strictEqual(runSmokeExit(1, 0, 0), 1, '有真失败 → 1（真回归必须让 CI 变红）');
-    assert.strictEqual(runSmokeExit(0, 1, 0), 2, '有跳过 → 2（本轮没跑完，不能当成通过）');
-    assert.strictEqual(runSmokeExit(0, 0, 1), 3, '有残留 → 3（文件留在用户工程里）');
+    assert.strictEqual(runSmokeExit(0, 0, 0).status, 0, '全部通过 → 0');
+    assert.strictEqual(runSmokeExit(1, 0, 0).status, 1, '有真失败 → 1（真回归必须让 CI 变红）');
+    assert.strictEqual(runSmokeExit(0, 1, 0).status, 2, '有跳过 → 2（本轮没跑完，不能当成通过）');
+    assert.strictEqual(runSmokeExit(0, 0, 1).status, 3, '有残留 → 3（文件留在用户工程里）');
+});
+
+test('★ 退出前必须调用 cleanup（关掉 MCP 客户端，CI 上漏了会留进程）', () => {
+    // ⚠️ cleanup 后面紧跟 process.exit，所以**漏掉它不影响退出码** ——
+    //    光看退出码测不出来，只能靠它打的标记。
+    const r = runSmokeExit(0, 0, 0);
+    assert.match(
+        String(r.stderr || ''),
+        /SELFTEST_CLEANUP_CALLED/,
+        '★ finish() 必须调用 cleanup'
+    );
 });
 
 test('★ 优先级：有真失败时退出码必须是 1（不能被跳过/残留盖掉）', () => {
-    assert.strictEqual(runSmokeExit(3, 10, 0), 1);
-    assert.strictEqual(runSmokeExit(3, 10, 1), 1);
+    assert.strictEqual(runSmokeExit(3, 10, 0).status, 1);
+    assert.strictEqual(runSmokeExit(3, 10, 1).status, 1);
 });
 
 test('★ 频道中毒这个场景**绝不能**退出 0（H1 的核心）', () => {
     // 「scene 频道不可用」会被记成 skip（引擎缺陷），不是 fail。
     // 如果退出码只看 fail，就会退出 0 → CI 判绿 → 真回归被淹没。
-    const code = runSmokeExit(0, 28, 0);
+    const code = runSmokeExit(0, 28, 0).status;
     assert.notStrictEqual(code, 0, '★ 有跳过时退出码绝不能是 0');
     assert.strictEqual(code, 2);
 });

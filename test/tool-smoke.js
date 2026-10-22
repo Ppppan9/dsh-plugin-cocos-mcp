@@ -724,7 +724,11 @@ if (process.argv.some((a) => a.startsWith('--selftest-exit='))) {
         fake.push({ name: 'selftest.skip' + k, status: 'skip', ms: 0, detail: '自测', reason: '自测用' });
     }
     for (let k = 0; k < nlf; k++) fake.push({ name: 'selftest.left' + k, status: 'leftover', ms: 0, detail: '自测' });
-    finish(fake, [], null);
+    // ⚠️ cleanup 也要被测到 ——
+    //    它负责关掉 MCP 客户端（CI 上漏了会留进程）。
+    //    真实运行里 cleanup 后面紧跟 process.exit，所以漏掉不影响退出码 ——
+    //    也就是说**光看退出码测不出来**。这里用 stderr 打标记来验。
+    finish(fake, [], () => process.stderr.write('SELFTEST_CLEANUP_CALLED\n'));
 }
 
 

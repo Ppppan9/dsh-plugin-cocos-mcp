@@ -171,11 +171,26 @@ function handleOffsetCurve(ctx, op) {
   //    结果是「什么都没改」——工具报 changed:0、磁盘不写，
   //    看起来是安全的，但调用方（尤其是模型）很可能把「changed:0」当成
   //    「已经改过了别的通道」。**假成功比报错更危险** → 直接拒绝。
-  if (op.axis !== undefined && op.axis !== null && !VALID_AXES.includes(String(op.axis))) {
-    throw new Error(
-      `offset-curve 的 axis "${op.axis}" 不是合法的轴名，只能是 ${VALID_AXES.join(' / ')}。` +
-      '（传错轴名会一个轴都命不中 → 什么都不改。与其静默无效，不如直接报错。）'
-    );
+  //
+  // ⚠️⚠️ 判断必须先卡住**类型** ——
+  //    只写 `VALID_AXES.includes(String(op.axis))` 的话，
+  //    `axis: ["x"]` 或 `axis: {toString: () => 'x'}` 会被 String() 强制转换成
+  //    "x" 而**通过校验**，但 applyOffset 用的是**原始值**
+  //    （`axes = [axis]` → 拿 `out[["x"]]` 去比）→ 一个轴都命不中 →
+  //    又变成「报成功但零效果」。实测过，不是理论风险。
+  if (op.axis !== undefined && op.axis !== null) {
+    if (typeof op.axis !== 'string') {
+      throw new Error(
+        `offset-curve 的 axis 必须是字符串（x / y / z），收到 ${typeof op.axis}。` +
+        '（数组 / 对象会被强制转换成字符串骗过校验，但实际一个轴都命不中 → 什么都不改。）'
+      );
+    }
+    if (!VALID_AXES.includes(op.axis)) {
+      throw new Error(
+        `offset-curve 的 axis "${op.axis}" 不是合法的轴名，只能是 ${VALID_AXES.join(' / ')}。` +
+        '（传错轴名会一个轴都命不中 → 什么都不改。与其静默无效，不如直接报错。）'
+      );
+    }
   }
   const changes = [];
   const channels = selectChannels(ctx, op.path);
