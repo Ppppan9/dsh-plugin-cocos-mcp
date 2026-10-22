@@ -113,6 +113,13 @@ Claude Code / Cursor / Codex
 它仍会跑完并产生副作用。若要真正中止，需要在 hub↔Bridge 之间加取消协议，
 目前没做 —— 这一点写在这里，免得被当成「取消 = 回滚」。
 
+**带 `id` 的 notification**：按 JSON-RPC 2.0，**带 `id` 就是一个请求**，服务器**必须回响应**
+（不回 ⇒ 客户端永远等那个 id，既没有错误也没有超时，就是挂住）。
+所以 `notifications/cancelled` / `notifications/progress` / `notifications/roots/list_changed`
+这三个方法如果**带 id** 发过来，hub 会回一个 `-32600 Invalid Request`
+并说明「notification 方法不该带 id」。
+正常客户端发的 notification 不带 id，按规范**不产生任何响应**。
+
 ---
 
 <!-- TOOLS:START -->

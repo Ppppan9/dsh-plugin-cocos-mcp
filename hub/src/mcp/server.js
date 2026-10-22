@@ -113,55 +113,93 @@ class McpServer {
         }
 
         try {
-            switch (msg.method) {
-                case 'initialize':
-                    return await this._onInitialize(msg);
-                // 注：notifications/initialized 已在统一早退里处理（无 id → return null），
-                // 状态在 _onInitialize 时就置好了，这里不需要分支。
-                //
-                // ⚠️ `notifications/cancelled` 是**有意忽略**的，不是漏了 ——
-                //    MCP 规范里它是 SHOULD（不是 MUST）让接收方中止。
-                //    这里选择「收到即丢弃、让操作跑完」：
-                //      · 半途取消一个**写操作**（比如 scene.open 提交到一半时中止）
-                //        比「让它跑完」更容易留下不一致的工程状态；
-                //      · 引擎侧一旦被打断，很可能停在「半开」状态 ——
-                //        那正是会把 scene 频道彻底毒掉的形态（调研报告 6.10 / 6.11）。
-                //    代价：取消一个耗时调用（比如最长 90 秒的 scene.open）**不会真的停下来**，
-                //    它仍会跑完并产生副作用。README 的协议说明里写清了这一点。
-                //    ⚠️ 别「顺手」改成半途取消 —— 那会比现在危险。
-                case 'notifications/cancelled':
-                case 'notifications/progress':
-                case 'notifications/roots/list_changed':
-                    return null;
-                case 'ping':
-                    return { jsonrpc: '2.0', id: msg.id, result: {} };
-                case 'tools/list':
-                    return await this._onToolsList(msg);
-                case 'tools/call':
-                    return await this._onToolsCall(msg);
-                case 'resources/list':
-                    return await this._onResourcesList(msg);
-                case 'resources/read':
-                    return await this._onResourcesRead(msg);
-                case 'resources/templates/list':
-                    return { jsonrpc: '2.0', id: msg.id, result: { resourceTemplates: [] } };
-                case 'prompts/list':
-                    return await this._onPromptsList(msg);
-                case 'prompts/get':
-                    return await this._onPromptsGet(msg);
-                case 'logging/setLevel':
-                    return { jsonrpc: '2.0', id: msg.id, result: {} };
-                case 'completion/complete':
-                    return { jsonrpc: '2.0', id: msg.id, result: { completion: { values: [], total: 0, hasMore: false } } };
-                default:
-                    return { jsonrpc: '2.0', id: msg.id, error: { code: JSONRPC_METHOD_NOT_FOUND, message: `Method not found: ${msg.method}` } };
+            const res = await this._route(msg);
+            // ⚠️ **结构化兜底**：带 id 的请求**必须有响应**。
+            //    任何方法「返回 null / undefined」都意味着客户端会一直等 ——
+            //    没有错误、没有超时，就是**悬挂**（第 10 轮复审 U-2 实测确认）。
+            //    ⇒ 在这里**统一收口**，不依赖每个 case 自己记得回响应。
+            //    （无 id 的 notification 已经在上面早退了，走不到这里。）
+            if (res === null || res === undefined) {
+                return {
+                    jsonrpc: '2.0',
+                    id: msg.id,
+                    error: {
+                        code: JSONRPC_INVALID_REQUEST,
+                        message: `Method produced no response: ${msg.method}`,
+                    },
+                };
             }
+            return res;
         } catch (err) {
             return {
                 jsonrpc: '2.0',
                 id: msg.id,
                 error: { code: JSONRPC_INTERNAL_ERROR, message: err && err.message ? err.message : String(err), data: err && err.stack ? err.stack : undefined },
             };
+        }
+    }
+
+    /**
+     * 方法路由 —— **只处理带 id 的请求**。
+     * （无 id 的 notification 已在 _dispatch 里统一早退，不走这里。）
+     */
+    async _route(msg) {
+        switch (msg.method) {
+            case 'initialize':
+                return await this._onInitialize(msg);
+            // 注：notifications/initialized 已在统一早退里处理（无 id → return null），
+            // 状态在 _onInitialize 时就置好了，这里不需要分支。
+            //
+            // ⚠️ `notifications/cancelled` 是**有意忽略**的，不是漏了 ——
+            //    MCP 规范里它是 SHOULD（不是 MUST）让接收方中止。
+            //    这里选择「收到即丢弃、让操作跑完」：
+            //      · 半途取消一个**写操作**（比如 scene.open 提交到一半时中止）
+            //        比「让它跑完」更容易留下不一致的工程状态；
+            //      · 引擎侧一旦被打断，很可能停在「半开」状态 ——
+            //        那正是会把 scene 频道彻底毒掉的形态（调研报告 6.10 / 6.11）。
+            //    代价：取消一个耗时调用（比如最长 90 秒的 scene.open）**不会真的停下来**，
+            //    它仍会跑完并产生副作用。README 的协议说明里写清了这一点。
+            //    ⚠️ 别「顺手」改成半途取消 —— 那会比现在危险。
+            //
+            // ⚠️ **这里能走到，说明客户端给 notification 带了 id** ——
+            //    「无 id」的情况已经在上面的统一早退里 return null 了。
+            //    按 JSON-RPC 2.0，**带 id 就是一个请求**，服务器**必须回响应**：
+            //    回 null ⇒ 客户端会一直等 id 对应的回复 ——
+            //    没有错误、没有超时，就是**悬挂**（第 10 轮复审 U-2 实测确认）。
+            //    ⇒ 明确回一个 Invalid Request，并把原因说清楚。
+            case 'notifications/cancelled':
+            case 'notifications/progress':
+            case 'notifications/roots/list_changed':
+                return {
+                    jsonrpc: '2.0',
+                    id: msg.id,
+                    error: {
+                        code: JSONRPC_INVALID_REQUEST,
+                        message: `Notification method must not carry an id: ${msg.method}`,
+                    },
+                };
+            case 'ping':
+                return { jsonrpc: '2.0', id: msg.id, result: {} };
+            case 'tools/list':
+                return await this._onToolsList(msg);
+            case 'tools/call':
+                return await this._onToolsCall(msg);
+            case 'resources/list':
+                return await this._onResourcesList(msg);
+            case 'resources/read':
+                return await this._onResourcesRead(msg);
+            case 'resources/templates/list':
+                return { jsonrpc: '2.0', id: msg.id, result: { resourceTemplates: [] } };
+            case 'prompts/list':
+                return await this._onPromptsList(msg);
+            case 'prompts/get':
+                return await this._onPromptsGet(msg);
+            case 'logging/setLevel':
+                return { jsonrpc: '2.0', id: msg.id, result: {} };
+            case 'completion/complete':
+                return { jsonrpc: '2.0', id: msg.id, result: { completion: { values: [], total: 0, hasMore: false } } };
+            default:
+                return { jsonrpc: '2.0', id: msg.id, error: { code: JSONRPC_METHOD_NOT_FOUND, message: `Method not found: ${msg.method}` } };
         }
     }
 

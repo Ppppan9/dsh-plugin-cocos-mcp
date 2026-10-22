@@ -119,6 +119,66 @@ test('★ notification 不产生任何响应', async () => {
     assert.strictEqual(outputs.length, 0, '★ notification 不该有响应');
 });
 
+// ───────────────────── 带 id 的 notification（U-2） ─────────────────────
+// ⚠️ 第 10 轮复审实测：客户端给 notification 带了 id 时，
+//    服务端**静默什么都不发** —— 客户端会永远等 id 对应的回复，
+//    没有错误、没有超时，就是**悬挂**。
+//    规范上 notification 不带 id，合规客户端不会这么发；
+//    但「不合规客户端会挂」不是可以忽略的理由 ——
+//    静默 = 没有任何线索，排查成本极高。
+
+test('★ 带 id 的 notification 必须回响应（静默 = 客户端悬挂）', async () => {
+    const { ask, outputs } = makeServer();
+    await ask({ jsonrpc: '2.0', id: 99, method: 'notifications/cancelled', params: { requestId: 1 } });
+    assert.strictEqual(outputs.length, 1, '★ 带 id 的请求必须有响应（静默 = 客户端一直等）');
+    assert.strictEqual(outputs[0].id, 99, '★ 响应的 id 必须和请求对上');
+    assert.ok(outputs[0].error, '★ 必须是 JSON-RPC error');
+    assert.strictEqual(outputs[0].error.code, -32600, '★ 应当是 Invalid Request');
+    // ⚠️ 判据要能区分「**专门处理了 notification 带 id**」和「**通用兜底接住的**」——
+    //    通用兜底的消息是 "Method produced no response: ..."，里面没有 "id"，
+    //    所以这个正则只在专门处理时成立。
+    assert.match(outputs[0].error.message, /notification.*id/i, '★ 错误信息要说清是 notification 带 id 的问题');
+});
+
+test('★ 三个 notification 方法带 id 时都要回响应（不能只修一个）', async () => {
+    for (const method of ['notifications/cancelled', 'notifications/progress', 'notifications/roots/list_changed']) {
+        const { ask, outputs } = makeServer();
+        await ask({ jsonrpc: '2.0', id: 5, method, params: {} });
+        assert.strictEqual(outputs.length, 1, `★ ${method} 带 id 时必须有响应`);
+        assert.strictEqual(outputs[0].id, 5);
+        assert.ok(outputs[0].error, `★ ${method} 必须回 error`);
+    }
+});
+
+test('★ 结构化兜底：任何方法返回 null 都必须回错误（不能依赖每个 case 自己记得回）', async () => {
+    // ⚠️ 上面那几条只覆盖了**已知的**三个 notification 方法。
+    //    真正防「将来新增的方法忘了回响应」的是**这一层兜底**：
+    //    任何方法返回 null / undefined ⇒ 统一转成 Invalid Request。
+    //    ⚠️ 判据不能是「那几个方法有没有回」——
+    //    那样新增方法时兜底就没人守了（这正是「测了函数 ≠ 测了接线」的同类）。
+    const { ask, outputs, server } = makeServer();
+    // 直接把路由换成一个「什么也不回」的实现，模拟漏写响应
+    server._route = async () => null;
+    await ask({ jsonrpc: '2.0', id: 7, method: 'ping' });
+    assert.strictEqual(outputs.length, 1, '★ 方法不响应时不能静默（客户端会悬挂）');
+    assert.strictEqual(outputs[0].id, 7, '★ 响应 id 必须对上');
+    assert.ok(outputs[0].error, '★ 必须回 JSON-RPC error');
+    assert.strictEqual(outputs[0].error.code, -32600);
+});
+
+test('★ 批量里带 id 的 notification 也要出现在响应数组里', async () => {
+    const { ask, outputs } = makeServer();
+    await ask([
+        { jsonrpc: '2.0', method: 'notifications/initialized' },
+        { jsonrpc: '2.0', id: 3, method: 'notifications/cancelled', params: {} },
+    ]);
+    assert.strictEqual(outputs.length, 1, '批量应合并成一个数组响应');
+    assert.ok(Array.isArray(outputs[0]));
+    assert.strictEqual(outputs[0].length, 1, '★ 只有带 id 的那一条有响应');
+    assert.strictEqual(outputs[0][0].id, 3);
+    assert.ok(outputs[0][0].error);
+});
+
 test('★ 未知 method → -32601', async () => {
     const { ask, outputs } = makeServer();
     await ask({ jsonrpc: '2.0', id: 1, method: 'nonexistent/method', params: {} });
