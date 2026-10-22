@@ -511,6 +511,33 @@ test('README 的验证章节：脚本存在，且可静态验证的数字与代�
     );
 });
 
+test('★ 扩展端实际发出的每个消息都必须在 3.8.8 契约里', () => {
+    // ⚠️ 这条守的是「用了 3.8.8 上**不存在**的消息」——
+    //    那种错只在**真机调用时**才炸（编辑器直接不回/报 not found），
+    //    而扩展端的 catch 往往把它包成一句含糊的错，排查成本很高。
+    //
+    //    契约表在 extension/bridge/messages.js（3.8.8 的 app.asar 逆向出来的），
+    //    verify() 是它的判定入口 —— 扩展端发消息前本来就过它，
+    //    这里做的是**离线静态核对**：全部用到的消息现在就应该是合法的。
+    const src = read('extension/bridge/handlers.js');
+    const used = new Map();
+    // ⚠️ 消息名要允许**数字**（`[a-z0-9-]+`）——
+    //    只匹配字母的话，含数字的消息名会被**整条漏掉**，
+    //    契约检查就成了「只查一部分」。
+    for (const re of [/send\(\s*'([a-z0-9-]+)'\s*,\s*'([a-z0-9-]+)'/g, /Editor\.Message\.request\(\s*'([a-z0-9-]+)'\s*,\s*'([a-z0-9-]+)'/g]) {
+        let m;
+        while ((m = re.exec(src))) used.set(`${m[1]}:${m[2]}`, (used.get(`${m[1]}:${m[2]}`) || 0) + 1);
+    }
+    assert.ok(used.size >= 40, `应该扫到不少消息调用，实际只扫到 ${used.size} 个`);
+    const bad = [];
+    for (const key of used.keys()) {
+        const i = key.indexOf(':');
+        const v = verify(key.slice(0, i), key.slice(i + 1));
+        if (!v.ok) bad.push(`${key} —— ${v.reason}`);
+    }
+    assert.deepStrictEqual(bad, [], `扩展端用了 3.8.8 契约之外的消息：\n  ${bad.join('\n  ')}`);
+});
+
 test('SOURCES.md 列出的每个调研仓库都真实存在对应引用', () => {
     const repos = [
         'DaxianLee/cocos-mcp-server',
