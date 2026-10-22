@@ -69,6 +69,11 @@ test('★ 特征表本身只有两条（加多了就会误伤）', () => {
 });
 
 test('★ 判据只能有**一份**定义（两份各写一份迟早漂移）', () => {
+    // ⚠️ 标记用**短片段**（`无响应` / `卡死`）而不是整句话 ——
+    //    整句话里的 `**` 可以被写成字符类（`[*][*]`）绕��字面量 grep，
+    //    而短片段很难绕（要匹配消息就必须含这些字）。
+    //    诚实地说：这不是万无一失的检查（`已\\s*经卡死` 仍能绕），
+    //    但它能挡住**真实发生过的**那种意外重复。
     // ⚠️ 第 8 轮复审前就是**两份** ——
     //    tool-smoke.js 改了用共享模块，editor-health.js 却还留着自己的副本。
     //    两边行为一旦漂移，就会出现「真机前置守卫说环境没问题、
@@ -77,16 +82,26 @@ test('★ 判据只能有**一份**定义（两份各写一份迟早漂移）', 
     const path = require('node:path');
     const dir = __dirname;
     const files = fs.readdirSync(dir).filter((f) => f.endsWith('.js') && !f.endsWith('.test.js'));
-    // 特征正则在**非测试文件**里只能出现在 smoke-poison.js 一处
-    const MARK = '场景频道\\*\\*暂时无响应\\*\\*';
+    // 特征片段在**非测试文件**里只能出现在 smoke-poison.js 一处
+    // ⚠️ 扫描前必须**剥掉注释** —— 否则文档里提到「暂时无响应」也会被当成实现。
+    const stripComments = (src) =>
+        src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    // ⚠️ 标记是**正则字面量的开头** `/场景频道` ——
+    //    用词（`卡死` / `无响应`）太粗：错误消息的**字符串**里就有这些词，
+    //    会被误判成「又抄了一份」。
+    //    而要匹配「场景频道**暂时无响应**…」这条消息，正则必然以 `/场景频道` 开头。
+    const MARKS = ['/场景频道'];
     const hits = [];
     for (const f of files) {
-        const src = fs.readFileSync(path.join(dir, f), 'utf8');
-        if (src.includes(MARK)) hits.push(f);
+        const src = stripComments(fs.readFileSync(path.join(dir, f), 'utf8'));
+        if (MARKS.some((m) => src.includes(m))) hits.push(f);
     }
     assert.deepStrictEqual(
         hits,
         ['smoke-poison.js'],
-        `判据的正则出现在多个文件里：${hits.join(', ')} —— 必须只有 smoke-poison.js 一份`
+        `判据的特征串出现在多个文件里：${hits.join(', ')} —— 必须只有 smoke-poison.js 一份`
     );
+    // 并且 editor-health 必须**引用**共享模块，而不是自己抄一份
+    const eh = fs.readFileSync(path.join(dir, 'editor-health.js'), 'utf8');
+    assert.match(eh, /require\('\.\/smoke-poison'\)/, 'editor-health.js 必须引用共享判据模块');
 });

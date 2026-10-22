@@ -44,12 +44,35 @@ test('★ 语义分层不能错：失败 / 没跑完 / 残留 / 崩溃 必须分
     assert.strictEqual(EXIT.CRASH, 4, '测试自身中断（脚本坏了）');
 });
 
-test('★ 各真机脚本必须用这张表，不许自己写裸数字', () => {
-    for (const f of ['test/tool-smoke.js', 'test/e2e.js', 'test/real-behavior.test.js']) {
+test('★ 各真机脚本必须用这张表，不许自己写退出码', () => {
+    const FILES = ['test/tool-smoke.js', 'test/e2e.js', 'test/real-behavior.test.js'];
+    for (const f of FILES) {
         const src = read(f);
         assert.match(src, /require\('\.\/exit-codes'\)/, `${f} 没有引用退出码词汇表`);
-        // 裸的 process.exit(<数字>) 就是绕过词汇表
-        const bare = src.match(/process\.exit\(\s*\d+\s*\)/g) || [];
-        assert.deepStrictEqual(bare, [], `${f} 里有绕过词汇表的裸退出码：${bare.join(', ')}`);
+
+        // ⚠️ 判据要**严格**：每一个 process.exit( 的参数里都必须出现 EXIT.XXX。
+        //    只挡「裸数字」是不够的 ——
+        //    `process.exit(fail === 0 ? 0 : 1)`、`process.exit(0 + 1)`、
+        //    `process.exitCode = 1` 都能绕过。
+        //
+        // ⚠️ 扫描前必须**剥掉注释** —— 文档里提到 process.exit(...) 会被误判。
+        const stripComments = (s2) =>
+            s2.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+        const code = stripComments(src);
+        const calls = [...code.matchAll(/process\.exit(Code)?\s*\(/g)];
+        for (const m of calls) {
+            const after = code.slice(m.index + m[0].length, m.index + m[0].length + 160);
+            assert.match(
+                after,
+                // exitCodeFor 必须**传满 3 个参数** ——
+                // `exitCodeFor(0)` 少传参数会拿到 undefined 的语义，
+                // 是另一种「看起来在用、其实没用对」。
+                /EXIT\.[A-Z_]+|exitCodeFor\(\s*[^,()]+\s*,\s*[^,()]+\s*,\s*[^,()]+\s*\)/,
+                `${f} 里的 ${m[0]} 没有用退出码词汇表（参数里必须出现 EXIT.XXX，或 exitCodeFor 传满 3 个参数）`
+            );
+        }
+        // process.exitCode = N 也算绕过
+        const bareExitCode = src.match(/process\.exitCode\s*=\s*(?!EXIT\.)[^;\n]+/g) || [];
+        assert.deepStrictEqual(bareExitCode, [], `${f} 里有绕过词汇表的 exitCode 赋值：${bareExitCode.join(', ')}`);
     }
 });
