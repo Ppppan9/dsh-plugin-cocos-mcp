@@ -17,6 +17,8 @@
  *    「本轮没测到」和「测了没问题」必须能被区分开。
  */
 
+const { EXIT } = require('./exit-codes');
+
 /**
  * @param {number} failedCount 真失败数
  * @param {number} skippedCount 跳过数（引擎缺陷导致本轮没跑完的检查）
@@ -27,10 +29,13 @@ function exitCodeFor(failedCount, skippedCount, leftoverCount) {
     const failed = Number(failedCount) || 0;
     const skipped = Number(skippedCount) || 0;
     const leftover = Number(leftoverCount) || 0;
-    if (failed > 0) return 1;
-    if (leftover > 0) return 3;
-    if (skipped > 0) return 2;
-    return 0;
+    // ⚠️ 码值必须**引用词汇表**，不能自己写死数字 ——
+    //    `test/exit-codes.js` 才是「唯一真相」，
+    //    这里再写一份 0/1/2/3 的话，改表时就不会联动。
+    if (failed > 0) return EXIT.FAILURE;
+    if (leftover > 0) return EXIT.LEFTOVER;
+    if (skipped > 0) return EXIT.INCOMPLETE;
+    return EXIT.OK;
 }
 
 module.exports = { exitCodeFor };
