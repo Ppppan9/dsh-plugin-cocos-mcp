@@ -118,10 +118,23 @@ test('★ 假载荷不能太假：真实流程必须真的跑到大部分工具'
         timeout: 60000,
         env: scriptEnv(),
     });
-    const m = String(r.stderr || '').match(/FAKE_CALLED_TOOLS:(\d+)/);
+    const stderr = String(r.stderr || '');
+    const m = stderr.match(/FAKE_CALLED_TOOLS:(\d+)/);
     assert.ok(m, '★ 假客户端应当报告跑到的工具数（否则这条断言会空转）');
     const n = Number(m[1]);
     assert.ok(n >= 65, `★ 真实流程只跑到了 ${n} 个工具 —— 假载荷太假，大段真实路径没被测到`);
+
+    // ⚠️ **光盯数量不够** ——
+    //    数量是个可以随手下调的门槛（把 65 改成 10 断言照样绿）。
+    //    ⇒ 改成断言**关键工具真的被跑到了**：
+    //    这几个正是「载荷太假」时会整段消失的那一段
+    //    （asset.query 返回空数组 → 场景生命周期整段被跳过）。
+    const called = new Set(
+        (stderr.match(/FAKE_CALLED:([\s\S]*)/) || ['', ''])[1].split(',').filter(Boolean)
+    );
+    for (const t of ['scene.create', 'scene.open', 'scene.save', 'scene.reload', 'asset.query', 'asset.delete']) {
+        assert.ok(called.has(t), `★ 关键工具 "${t}" 在真实流程里**没被跑到** —— 假载荷太假`);
+    }
 });
 
 test('★ 真实流程里那个 finish() 调用不能被删（不然脚本不打印汇总、退出码 0）', () => {

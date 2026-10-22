@@ -139,7 +139,12 @@ function makeFakeClient() {
             try {
                 // ⚠️ 报的是**去重后的工具数** —— 调用次数会被重复调用放大，
                 //    退化时看着仍然很高，就抓不住了。
-                require('node:fs').appendFileSync('/dev/stderr', `FAKE_CALLED_TOOLS:${new Set(this.calls).size}\n`);
+                //    连同**具体调了哪些工具**一起报出去 ——
+                //    光看数量只能说明「大概跑到了」，说清是哪些才能断言
+                //    「关键路径真的被跑到了」（数字可以被调门槛，工具名不能）。
+                const distinct = [...new Set(this.calls)].sort();
+                require('node:fs').appendFileSync('/dev/stderr', `FAKE_CALLED_TOOLS:${distinct.length}\n`);
+                require('node:fs').appendFileSync('/dev/stderr', `FAKE_CALLED:${distinct.join(',')}\n`);
             } catch (_) {}
             // ⚠️ 打一个标记 —— 真实调用点如果把 cleanup 实参改成 null，
             //    客户端就永远不会被关掉（CI 上漏进程）。
