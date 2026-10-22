@@ -274,7 +274,11 @@ const GLOBAL_TOOLS = [
     T('cocos_prefab_batch', {
         title: '离线批量编辑 prefab',
         description:
-            '从 JSON 文件读取 ops 后批量编辑。opsJsonPath 是 JSON 文件的**绝对路径**，内容是 op 数组。\n' +
+            '从 JSON 文件读取 ops 后批量编辑。opsJsonPath 是 JSON 文件的**绝对路径**（单文件或 {"files":[...]} 多文件形态）。\n' +
+            '内容有两种形态：\n' +
+            '  · 单文件：{"filePath": "<prefab 绝对路径>", "ops": [ ...op 数组... ]}\n' +
+            '  · 多文件：{"files": [{"filePath": "...", "ops": [...]}, ...]}\n' +
+            '多文件是**跨文件原子**的 —— 任一文件失败则整批不写盘（已写的会回滚）。\n' +
             '适合一次性改几十个 prefab 的重复性改动。事务语义同 cocos_prefab_edit。',
         inputSchema: {
             type: 'object',
@@ -290,14 +294,24 @@ const GLOBAL_TOOLS = [
             // ⚠️ batch 的目标文件与 op 里的路径都来自**不可信的 JSON 文件** ——
             //    必须和 edit 一样接上 op 级护栏，否则项目 A 里的 ops.json
             //    能改写项目 B（甚至项目外）的文件。
+            //
+            // ⚠️ 检查必须在**写盘之前** ——
+            //    之前这段读的是 `res.data.ops`，而 editPrefab / batchPrefab 的返回里
+            //    **根本没有 ops 字段** → 这道护栏从来没生效过（看着有、其实没有）。
+            //    现在改成先 peek 出 ops 清单，检查通过再交给离线层执行。
+            const peeked = offline.peekBatchOps(opsJsonPath);
+            if (peeked && peeked.ok && peeked.data) {
+                const plan = peeked.data;
+                const allOps = plan.mode === 'multi'
+                    ? plan.files.map((f) => (f && Array.isArray(f.ops) ? f.ops : []))
+                    : [plan.ops];
+                for (const ops of allOps) assertOpPathsInsideProject(ctx, ops, 'op 内路径');
+            }
             const res = offline.batchPrefab({
                 opsJsonPath,
                 dryRun: !!args.dryRun,
                 allowedRoots: projectRoots(ctx),
             });
-            if (res && res.ok && res.data && Array.isArray(res.data.ops)) {
-                assertOpPathsInsideProject(ctx, res.data.ops, 'op 内路径');
-            }
             return unwrapOffline(res, 'cocos_prefab_batch');
         },
         safety: 'write',

@@ -117,7 +117,7 @@ Claude Code / Cursor / Codex
 | `cocos_knowledge` | 查询 Cocos Creator 3.8.x 的实操知识，避免反复试错。topic 取值： |
 | `cocos_prefab_query` | 直接读 .prefab 文件（不需要编辑器运行）。 |
 | `cocos_prefab_edit` | 声明式批量修改 .prefab 文件。**所有 op 全部成功才会落盘，任一失败磁盘零写入**（事务语义）。 |
-| `cocos_prefab_batch` | 从 JSON 文件读取 ops 后批量编辑。opsJsonPath 是 JSON 文件的**绝对路径**，内容是 op 数组。 |
+| `cocos_prefab_batch` | 从 JSON 文件读取 ops 后批量编辑。opsJsonPath 是 JSON 文件的**绝对路径**（单文件或 {"files":[...]} 多文件形态）。 |
 | `cocos_prefab_ops` | 列出 cocos_prefab_edit / cocos_prefab_batch 支持的全部 **prefab** op、必填参数与可选参数。不确定某个操作叫什么名字时先查这里。动画相关 op 见 cocos_anim_ops。不需要参数。 |
 | `cocos_anim_ops` | 列出 cocos_anim_batch 支持的全部 **动画** op、必填参数与可选参数。prefab 相关 op 见 cocos_prefab_ops。不需要参数。 |
 | `cocos_anim_query` | 读 .anim 文件（不需要编辑器运行）。selector 取值：tree（轨道树）/ node（某节点的轨道）/ find（按名字找）/ field（查属性）。 |

@@ -246,78 +246,146 @@ function describeElement(el) {
     return n ? `${t} "${n}"` : t;
 }
 
-function editPrefab(args) {
-    try {
-        const { filePath, ops } = args || {};
-        if (!filePath) return err('缺少 filePath');
-        if (!fs.existsSync(filePath)) return err(`文件不存在：${filePath}`);
-        if (!Array.isArray(ops) || !ops.length) return err('ops 必须是非空数组');
+/**
+ * 准备阶段：校验 + 在内存里执行 op + 序列化 + 算 diff，**完全不写盘**。
+ *
+ * 拆出来是为了让批量编辑能做真正的**两阶段提交** ——
+ * 之前每个文件各自「执行 + 写盘」，第 3 个文件失败时，
+ * 前 2 个文件**已经写进磁盘**了（跨文件非原子）。
+ *
+ * @returns {{ok:true,data:object}|{ok:false,error:string}}
+ */
+function preparePrefab(args) {
+    const { filePath, ops } = args || {};
+    if (!filePath) return err('缺少 filePath');
+    if (!fs.existsSync(filePath)) return err(`文件不存在：${filePath}`);
+    if (!Array.isArray(ops) || !ops.length) return err('ops 必须是非空数组');
 
-        // 1) 校验（一次性报齐所有错误）
-        const errors = validateOps(ops, OP_DEFS);
-        if (errors.length) {
+    // 1) 校验（一次性报齐所有错误）
+    const errors = validateOps(ops, OP_DEFS);
+    if (errors.length) {
+        return err(
+            `op 校验未通过（${errors.length} 处）：\n` +
+            errors.map((e) => `  - ${e.message}`).join('\n')
+        );
+    }
+
+    // ⚠️ filePath 本身也要过护栏 ——
+    //    batchPrefab 的目标文件来自 ops JSON 文件，hub 只校验了那个 JSON 的位置，
+    //    结果项目 A 里的 ops.json 可以改写项目 B 的文件。
+    // ⚠️ 不能加 `.length` 判断 —— 那会把「显式空数组」当成「没配置」，
+    //    导致同一个 [] 在 filePath 层放行、在 op 层拒绝，语义相反。
+    //    null / [] / 非空 三种语义由 assertOpPathAllowed 自己区分。
+    if (Array.isArray(args.allowedRoots)) {
+        assertOpPathAllowed(ctxForGuard(args.allowedRoots), path.resolve(filePath), 'prefab 路径');
+    }
+    const originalText = readTextFile(filePath);
+    const originalData = parseJsonText(originalText, filePath);
+    const ctx = loadPrefabForEdit(filePath);
+    ctx.projectRoot = findProjectRoot(filePath);
+    ctx.classIdIndex = buildClassIdIndex(ctx.projectRoot);
+    ctx.metaPlans = [];
+    ctx.planMetaWrite = planMetaWrite;
+    ctx.allowedRoots = Array.isArray(args.allowedRoots) ? args.allowedRoots.slice() : null;
+
+    // 2) 逐 op 在内存执行
+    const results = [];
+    for (let i = 0; i < ops.length; i++) {
+        const op = ops[i];
+        const handler = HANDLERS[op.op];
+        if (!handler) return err(`第 ${i + 1} 个 op "${op.op}" 没有执行器`);
+        try {
+            const r = handler(ctx, op);
+            results.push({ step: i + 1, op: op.op, result: r });
+        } catch (e) {
+            // 失败 → 磁盘零写入（连 .meta 计划都不提交）
             return err(
-                `op 校验未通过（${errors.length} 处）：\n` +
-                errors.map((e) => `  - ${e.message}`).join('\n')
+                `第 ${i + 1} 步 op "${op.op}" 执行失败：${e.message}\n` +
+                `（磁盘未发生任何写入，前 ${i} 步的结果已全部丢弃）`
             );
         }
+    }
 
-        // ⚠️ filePath 本身也要过护栏 ——
-        //    batchPrefab 的目标文件来自 ops JSON 文件，hub 只校验了那个 JSON 的位置，
-        //    结果项目 A 里的 ops.json 可以改写项目 B 的文件。
-        // ⚠️ 不能加 `.length` 判断 —— 那会把「显式空数组」当成「没配置」，
-        //    导致同一个 [] 在 filePath 层放行、在 op 层拒绝，语义相反。
-        //    null / [] / 非空 三种语义由 assertOpPathAllowed 自己区分。
-        if (Array.isArray(args.allowedRoots)) {
-            assertOpPathAllowed(ctxForGuard(args.allowedRoots), path.resolve(filePath), 'prefab 路径');
-        }
-        const originalText = readTextFile(filePath);
-        const originalData = parseJsonText(originalText, filePath);
-        const ctx = loadPrefabForEdit(filePath);
-        ctx.projectRoot = findProjectRoot(filePath);
-        ctx.classIdIndex = buildClassIdIndex(ctx.projectRoot);
-        ctx.metaPlans = [];
-        ctx.planMetaWrite = planMetaWrite;
-        ctx.allowedRoots = Array.isArray(args.allowedRoots) ? args.allowedRoots.slice() : null;
+    const newText = serializeJson(ctx.data, ctx.format);
+    const diff = computeDiff(originalData, ctx.data);
+    // .meta 的写入也是真实改动，必须出现在 diff 里 ——
+    // 否则「改了但 diff 显示 0 处变化」，调用方会以为没改。
+    const metaChanges = ctx.metaPlans.map((plan) => ({
+        index: -1,
+        type: plan.existed ? 'meta-modified' : 'meta-created',
+        summary: `meta ${plan.existed ? '已更新' : '已创建'}: ${path.basename(plan.path)}`,
+    }));
+    const allChanges = diff.concat(metaChanges);
 
-        // 2) 逐 op 在内存执行
-        const results = [];
-        for (let i = 0; i < ops.length; i++) {
-            const op = ops[i];
-            const handler = HANDLERS[op.op];
-            if (!handler) return err(`第 ${i + 1} 个 op "${op.op}" 没有执行器`);
+    return ok({
+        filePath,
+        originalText,
+        newText,
+        allChanges,
+        steps: results,
+        metaPlans: ctx.metaPlans.slice(),
+    });
+}
+
+/** 提交阶段：.meta 先行，主文件最后；中途失败由 commitPlans 自动回滚本组。 */
+function commitPrepared(plan) {
+    const plans = plan.metaPlans.slice();
+    plans.push({
+        path: plan.filePath,
+        content: plan.newText,
+        existed: true,
+        backupContent: plan.originalText,
+    });
+    return commitPlans(plans);
+}
+
+/**
+ * 回滚已提交的文件 —— 用 prepare 阶段记下的 backupContent，
+ * 与 commitPlans 内部回滚是同一份数据。
+ * @returns {number} 实际恢复的写入处数
+ */
+function rollbackPrepared(preparedList) {
+    let n = 0;
+    for (const p of preparedList) {
+        if (!p.plan.allChanges.length) continue; // 没改过的文件不必碰
+        const plans = p.plan.metaPlans.map((m) => ({
+            path: m.path,
+            existed: m.existed,
+            backupContent: m.backupContent,
+        }));
+        plans.push({ path: p.plan.filePath, existed: true, backupContent: p.plan.originalText });
+        for (const plan of plans) {
             try {
-                const r = handler(ctx, op);
-                results.push({ step: i + 1, op: op.op, result: r });
-            } catch (e) {
-                // 失败 → 磁盘零写入（连 .meta 计划都不提交）
-                return err(
-                    `第 ${i + 1} 步 op "${op.op}" 执行失败：${e.message}\n` +
-                    `（磁盘未发生任何写入，前 ${i} 步的结果已全部丢弃）`
-                );
+                if (plan.existed && plan.backupContent !== null) {
+                    atomicWrite(plan.path, plan.backupContent);
+                    n++;
+                } else if (fs.existsSync(plan.path)) {
+                    fs.unlinkSync(plan.path);
+                    n++;
+                }
+            } catch (_) {
+                /* 回滚尽力而为 */
             }
         }
+    }
+    return n;
+}
 
-        const newText = serializeJson(ctx.data, ctx.format);
-        const diff = computeDiff(originalData, ctx.data);
-        // .meta 的写入也是真实改动，必须出现在 diff 里 ——
-        // 否则「改了但 diff 显示 0 处变化」，调用方会以为没改。
-        const metaChanges = ctx.metaPlans.map((plan) => ({
-            index: -1,
-            type: plan.existed ? 'meta-modified' : 'meta-created',
-            summary: `meta ${plan.existed ? '已更新' : '已创建'}: ${path.basename(plan.path)}`,
-        }));
-        const allChanges = diff.concat(metaChanges);
+function editPrefab(args) {
+    try {
+        const prepared = preparePrefab(args);
+        if (!prepared.ok) return prepared;
+        const p = prepared.data;
 
         // 3) dryRun → 只返回 diff
         if (args.dryRun) {
             return ok({
-                filePath,
+                filePath: p.filePath,
                 dryRun: true,
-                wouldChange: allChanges.length,
-                diff: allChanges,
-                steps: results,
-                pendingMeta: ctx.metaPlans.map((p) => p.path),
+                wouldChange: p.allChanges.length,
+                diff: p.allChanges,
+                steps: p.steps,
+                pendingMeta: p.metaPlans.map((m) => m.path),
             });
         }
 
@@ -328,29 +396,22 @@ function editPrefab(args) {
         //    期间原文件是**被替换过**的（进程此刻被杀就可能留下残file），
         //    而且 mtime 变了会让编辑器/构建系统以为资源变了。
         //    零效果的 op（例如把节点名改成它本来的名字）应该**什么都不做**。
-        if (allChanges.length === 0) {
+        if (p.allChanges.length === 0) {
             return ok({
-                filePath,
+                filePath: p.filePath,
                 changed: 0,
                 diff: [],
-                steps: results,
+                steps: p.steps,
                 written: [],
                 noop: true,
             });
         }
-        const plans = ctx.metaPlans.slice();
-        plans.push({
-            path: filePath,
-            content: newText,
-            existed: true,
-            backupContent: originalText,
-        });
-        const written = commitPlans(plans);
+        const written = commitPrepared(p);
         return ok({
-            filePath,
-            changed: allChanges.length,
-            diff: allChanges,
-            steps: results,
+            filePath: p.filePath,
+            changed: p.allChanges.length,
+            diff: p.allChanges,
+            steps: p.steps,
             written,
         });
     } catch (e) {
@@ -358,35 +419,124 @@ function editPrefab(args) {
     }
 }
 
+/**
+ * 只解析 ops 文件，**不执行**。
+ *
+ * 单独暴露出来，是为了让上层能在**写盘前**检查 op 里的路径 ——
+ * 之前 hub 层那个检查读的是 `res.data.ops`，
+ * 而 editPrefab / batchPrefab 的返回里**根本没有 ops 字段**
+ * → 那道护栏从来没生效过（看着有、其实没有）。
+ *
+ * batchPrefab 自己也走这个函数，避免两处解析逻辑漂移。
+ */
+function peekBatchOps(opsJsonPath) {
+    if (!opsJsonPath) return err('缺少 opsJsonPath');
+    if (!fs.existsSync(opsJsonPath)) return err(`ops 文件不存在：${opsJsonPath}`);
+    let parsed;
+    try {
+        parsed = JSON.parse(readTextFile(opsJsonPath));
+    } catch (e) {
+        return err(`ops 文件不是合法 JSON：${e.message}`);
+    }
+
+    // ⚠️ 顺序：**先**判多文件形态 ——
+    //    之前「必须有 ops」的守卫排在 files 分支**前面**，
+    //    于是 {files:[...]}（没有 ops 字段）在到达 files 分支前就被拦掉，
+    //    多文件形态**根本进不去**。
+    if (!Array.isArray(parsed) && Array.isArray(parsed.files)) {
+        return ok({ mode: 'multi', files: parsed.files });
+    }
+    const ops = Array.isArray(parsed) ? parsed : parsed && parsed.ops;
+    if (!Array.isArray(ops)) return err('ops 文件内容必须是数组，或含 ops 数组字段');
+    const target = parsed && parsed.filePath;
+    if (!target) return err('ops 文件里没有 filePath 字段');
+    return ok({ mode: 'single', filePath: target, ops });
+}
+
+/**
+ * 多文件批量：**两阶段提交**。
+ *
+ * ⚠️ 之前每个文件各自「执行 + 写盘」—— 第 3 个文件失败时，
+ *    前 2 个文件已经写进磁盘了（跨文件非原子）。
+ *    调用方看到「批量失败」，通常会以为什么都没发生 →
+ *    工程就停在半改的状态，而且没人知道。
+ *
+ * 现在：
+ *   阶段 1  所有文件只 prepare（零写入）→ 任何 op 失败都在**没写任何东西**时暴露
+ *   阶段 2  才提交；提交中途失败（磁盘错误之类）→ 回滚已写的文件
+ */
+function batchMultiFile(files, args) {
+    if (!files.length) return err('files 是空数组，没有可执行的文件');
+    for (const f of files) {
+        if (!f || typeof f !== 'object') return err('files 里每一项都必须是对象');
+        if (!f.filePath) return err('files 里每一项都必须有 filePath');
+        if (!Array.isArray(f.ops) || !f.ops.length) {
+            return err(`files 里 "${f.filePath}" 必须有非空 ops 数组`);
+        }
+    }
+
+    // ── 阶段 1：全部 prepare，磁盘零写入 ──
+    const prepared = [];
+    for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        const r = preparePrefab({ filePath: f.filePath, ops: f.ops, allowedRoots: args.allowedRoots });
+        if (!r.ok) {
+            return err(
+                `第 ${i + 1}/${files.length} 个文件准备失败（磁盘未发生任何写入）：${f.filePath}\n${r.error}`
+            );
+        }
+        prepared.push({ file: f, plan: r.data });
+    }
+
+    if (args.dryRun) {
+        return ok({
+            mode: 'multi',
+            dryRun: true,
+            files: prepared.map((p) => ({
+                filePath: p.file.filePath,
+                wouldChange: p.plan.allChanges.length,
+                diff: p.plan.allChanges,
+            })),
+        });
+    }
+
+    // ── 阶段 2：提交 ──
+    const results = [];
+    for (let i = 0; i < prepared.length; i++) {
+        const p = prepared[i];
+        if (!p.plan.allChanges.length) {
+            // 零效果的 op 不写盘（和单文件模式一致）
+            results.push({ filePath: p.file.filePath, ok: true, changed: 0, written: [], noop: true });
+            continue;
+        }
+        try {
+            const written = commitPrepared(p.plan);
+            results.push({ filePath: p.file.filePath, ok: true, changed: p.plan.allChanges.length, written });
+        } catch (e) {
+            const rolled = rollbackPrepared(prepared.slice(0, i));
+            return err(
+                `第 ${i + 1}/${prepared.length} 个文件写入失败：${p.file.filePath}\n${e.message}\n` +
+                (rolled
+                    ? `已回滚 ${rolled} 处写入，磁盘已恢复到本批次开始前的状态。`
+                    : '没有文件被写入，磁盘未发生变化。')
+            );
+        }
+    }
+    return ok({ mode: 'multi', files: results });
+}
+
 function batchPrefab(args) {
     try {
-        const { opsJsonPath } = args || {};
-        if (!opsJsonPath) return err('缺少 opsJsonPath');
-        if (!fs.existsSync(opsJsonPath)) return err(`ops 文件不存在：${opsJsonPath}`);
-        let parsed;
-        try {
-            parsed = JSON.parse(readTextFile(opsJsonPath));
-        } catch (e) {
-            return err(`ops 文件不是合法 JSON：${e.message}`);
-        }
-        const ops = Array.isArray(parsed) ? parsed : parsed && parsed.ops;
-        if (!Array.isArray(ops)) return err('ops 文件内容必须是数组，或含 ops 数组字段');
-
-        // 支持 [{filePath, ops:[...]}] 的多文件形态
-        if (!Array.isArray(parsed) && Array.isArray(parsed.files)) {
-            const results = [];
-            for (const f of parsed.files) {
-                const r = editPrefab({ filePath: f.filePath, ops: f.ops, dryRun: args.dryRun, allowedRoots: args.allowedRoots });
-                results.push({ filePath: f.filePath, ok: r.ok, error: r.error, changed: r.data && r.data.changed });
-            }
-            const failed = results.filter((r) => !r.ok);
-            if (failed.length) return err(`${failed.length} 个文件失败：\n` + failed.map((f) => `  - ${f.filePath}: ${f.error}`).join('\n'));
-            return ok({ mode: 'multi', files: results });
-        }
-
-        const target = parsed && parsed.filePath;
-        if (!target) return err('ops 文件里没有 filePath 字段');
-        return editPrefab({ filePath: target, ops, dryRun: args.dryRun, allowedRoots: args.allowedRoots });
+        const peeked = peekBatchOps(args && args.opsJsonPath);
+        if (!peeked.ok) return peeked;
+        const plan = peeked.data;
+        if (plan.mode === 'multi') return batchMultiFile(plan.files, args);
+        return editPrefab({
+            filePath: plan.filePath,
+            ops: plan.ops,
+            dryRun: args.dryRun,
+            allowedRoots: args.allowedRoots,
+        });
     } catch (e) {
         return err(e);
     }
@@ -439,8 +589,9 @@ module.exports = {
     queryPrefab,
     editPrefab,
     batchPrefab,
+    peekBatchOps,
     queryAnimation,
     editAnimation,
     // 便于测试与复用
-    _internal: { computeDiff, validateOps, OP_DEFS, ANIM_OP_DEFS },
+    _internal: { computeDiff, validateOps, OP_DEFS, ANIM_OP_DEFS, preparePrefab, commitPrepared },
 };
