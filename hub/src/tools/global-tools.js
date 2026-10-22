@@ -449,11 +449,10 @@ const GLOBAL_TOOLS = [
  * `replace-nested-prefab.prefabPath` 都能指向项目外的任意文件，
  * 造成「项目外任意写」与「项目外任意读」。
  */
-const OP_PATH_FIELDS = [
-    { op: 'ensure-meta', field: 'path' },
-    { op: 'add-nested-prefab', field: 'prefabPath' },
-    { op: 'replace-nested-prefab', field: 'prefabPath' },
-];
+// ⚠️ 清单来自**离线模块**（op 定义在那里）——
+//    之前这里和离线层各有一份手工白名单，两份各自独立、必须同步改：
+//    新增带路径字段的 op 忘了同步 → 护栏对新 op 静默失效。
+const OP_PATH_FIELDS = require('../offline/ops').OP_PATH_FIELDS;
 
 function assertOpPathsInsideProject(ctx, ops, label = 'op 内路径') {
     if (!Array.isArray(ops)) return;

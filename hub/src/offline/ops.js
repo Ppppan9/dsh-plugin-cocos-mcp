@@ -908,7 +908,6 @@ const HANDLERS = {
 
     'add-nested-prefab': (ctx, op) => {
         const parentIdx = findNodeIndex(ctx, op.parent);
-        if (op.prefabPath) assertOpPathAllowed(ctx, path.resolve(op.prefabPath), 'add-nested-prefab.prefabPath');
         const prefabPath = op.prefabPath || resolvePrefabPath(ctx, op.prefabUuid);
         if (!prefabPath) throw new Error(`找不到 prefab "${op.prefabUuid}" 对应的文件路径（可显式传 prefabPath）`);
         const created = inlineNestedPrefab(ctx, {
@@ -923,7 +922,6 @@ const HANDLERS = {
 
     'replace-nested-prefab': (ctx, op) => {
         const idx = findNodeIndex(ctx, op.node);
-        if (op.prefabPath) assertOpPathAllowed(ctx, path.resolve(op.prefabPath), 'replace-nested-prefab.prefabPath');
         const prefabPath = op.prefabPath || resolvePrefabPath(ctx, op.prefabUuid);
         if (!prefabPath) throw new Error(`找不到 prefab "${op.prefabUuid}" 对应的文件路径（可显式传 prefabPath）`);
         const r = replaceNestedPrefab(ctx, { nodeIndex: idx, prefabPath });
@@ -952,7 +950,6 @@ const HANDLERS = {
 
     'ensure-meta': (ctx, op) => {
         const target = path.resolve(op.path);
-        assertOpPathAllowed(ctx, target, 'ensure-meta.path');
         const plan = ctx.planMetaWrite(target, { uuid: op.uuid });
         // planMetaWrite 一定返回对象（existed 时也会返回，内容不变时 skipped=true）
         if (plan.skipped) {
@@ -1073,6 +1070,46 @@ const HANDLERS = {
  * 这个模块是独立的可复用单元，不能假设调用方一定检查过。
  * ctx.allowedRoots 由调用方注入（hub 传项目根 + 额外根）。
  */
+/**
+ * op 里**哪些字段是文件路径** —— 唯一真相。
+ *
+ * ⚠️ 之前这里和 hub 层各有一份手工白名单，两份各自独立、必须同步改：
+ *    新增一个带路径字段的 op 却忘了加进其中一份 →
+ *    那道护栏对新 op **完全不生效**，而且没有任何报错（典型的「看着有、其实没有」）。
+ *
+ * ⚠️ 而且不能靠「字段名像不像路径」来自动推导 ——
+ *    `bulk-set.target` 是节点/组件名不是路径、`offset-curve.path` 是动画通道路径
+ *    也不是文件路径 —— 正则会误伤。
+ *    ⇒ 这份表**必须显式维护**，但维护一处就够：
+ *    下面的 `assertOpPathFields` 由表驱动，守卫逻辑**只有这一处**。
+ *
+ * 清单放在离线模块（而不是 hub），因为**op 定义在这里** ——
+ * 离 op 定义近的那份表才是会跟着一起改的那份。
+ */
+const OP_PATH_FIELDS = [
+    { op: 'ensure-meta', field: 'path' },
+    { op: 'add-nested-prefab', field: 'prefabPath' },
+    { op: 'replace-nested-prefab', field: 'prefabPath' },
+];
+
+/**
+ * 按表校验 op 里的路径字段（**由数据驱动**，不靠每个 op 自己记得调）。
+ *
+ * ⚠️ 之前每个 op 在自己的处理函数里手写一行 `assertOpPathAllowed(...)` ——
+ *    新增 op 时忘了写，那道护栏就静默失效。
+ *    现在改成：执行器在调用 handler **之前**统一按表检查，
+ *    新增 op 只要在 `OP_PATH_FIELDS` 里加一行，护栏自动生效。
+ */
+function assertOpPathFields(ctx, op) {
+    if (!op || typeof op !== 'object') return;
+    for (const rule of OP_PATH_FIELDS) {
+        if (rule.op !== op.op) continue;
+        const p = op[rule.field];
+        if (typeof p !== 'string' || !p) continue;
+        assertOpPathAllowed(ctx, path.resolve(p), `${rule.op}.${rule.field}`);
+    }
+}
+
 function assertOpPathAllowed(ctx, target, label) {
     const roots = ctx && Array.isArray(ctx.allowedRoots) ? ctx.allowedRoots : null;
     if (roots === null) {
@@ -1159,4 +1196,6 @@ module.exports = {
     assertSafePathSegments,
     suggest,
     assertOpPathAllowed,
+    assertOpPathFields,
+    OP_PATH_FIELDS,
 };

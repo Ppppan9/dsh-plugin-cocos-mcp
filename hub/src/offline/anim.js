@@ -13,6 +13,7 @@
  */
 
 const { isPlainObject, deepClone, typeOf, refId, loadAnimFromData, getKeyframes: parseGetKeyframes } = require('./parse');
+const { assertOpPathFields } = require('./ops');
 
 /* ------------------------------------------------------------- op schema */
 
@@ -306,6 +307,12 @@ function executeAnimOps(ctx, ops) {
     const op = ops[i];
     const name = op.op;
     const handler = ANIM_HANDLERS[name];
+    // ⚠️ 也按表校验路径字段 ——
+    //    表里**没有** anim 的 path（那是动画**通道路径**不是文件路径，加进去会误伤）。
+    //    这里调一次是为了将来新增带文件路径的 anim op 时，护栏自动生效。
+    //    ⚠️ 依赖 ctx.allowedRoots —— editAnimation 必须把它设上，
+    //    否则这里会**静默空转**（roots=null → 不拦），那正是「看着有、其实没有」。
+    assertOpPathFields(ctx, op);
     if (!handler) {
       throw new Error(`anim 操作未实现："${name}"（op #${i + 1}）`);
     }

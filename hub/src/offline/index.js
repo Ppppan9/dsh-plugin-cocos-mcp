@@ -26,7 +26,7 @@ const {
     instanceForNode,
 } = require('./parse');
 const { readTextFile, parseJsonText, detectFormat, serializeJson, atomicWrite, planMetaWrite, commitPlans } = require('./write');
-const { OP_DEFS, HANDLERS, validateOps, buildClassIdIndex, findProjectRoot, findNodeIndex, nodeComponents, splitPath, getPath, assertOpPathAllowed } = require('./ops');
+const { OP_DEFS, HANDLERS, validateOps, buildClassIdIndex, findProjectRoot, findNodeIndex, nodeComponents, splitPath, getPath, assertOpPathAllowed, assertOpPathFields } = require('./ops');
 const { ANIM_HANDLERS, ANIM_OP_DEFS, executeAnimOps } = require('./anim');
 const { compressUUID } = require('./id');
 
@@ -307,6 +307,11 @@ function preparePrefab(args) {
         const handler = HANDLERS[op.op];
         if (!handler) return err(`第 ${i + 1} 个 op "${op.op}" 没有执行器`);
         try {
+            // ⚠️ op 里的路径字段**统一按表校验**（表在 ops.js，离 op 定义最近的那份）——
+            //    之前是每个 op 在自己的处理函数里手写一行 assertOpPathAllowed，
+            //    新增 op 时忘了写 → 那道护栏静默失效（看着有、其实没有）。
+            //    改成由数据驱动：新增 op 只要在 OP_PATH_FIELDS 里加一行即可。
+            assertOpPathFields(ctx, op);
             const r = handler(ctx, op);
             results.push({ step: i + 1, op: op.op, result: r });
         } catch (e) {
@@ -587,6 +592,10 @@ function editAnimation(args) {
             assertOpPathAllowed(ctxForGuard(args.allowedRoots), path.resolve(filePath), 'anim 路径');
         }
 
+        // ⚠️ ctx 要带 allowedRoots —— anim 执行器里的表驱动路径校验靠它。
+        //    不设的话 roots=null → 静默不拦（看着有、其实没有）。
+        const animCtxBase = { allowedRoots: Array.isArray(args.allowedRoots) ? args.allowedRoots.slice() : null };
+
         const errors = validateOps(ops, ANIM_OP_DEFS);
         if (errors.length) {
             return err(`op 校验未通过（${errors.length} 处）：\n` + errors.map((e) => `  - ${e.message}`).join('\n'));
@@ -594,6 +603,8 @@ function editAnimation(args) {
 
         const originalText = readTextFile(filePath);
         const ctx = loadAnim(filePath);
+        // ⚠️ 把 allowedRoots 挂到 ctx 上 —— anim 执行器里的表驱动路径校验靠它
+        ctx.allowedRoots = animCtxBase.allowedRoots;
         const originalData = JSON.parse(originalText);
 
         try {

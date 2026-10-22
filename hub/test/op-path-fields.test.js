@@ -167,3 +167,65 @@ test('★ 离线层**自己**也要拦住越界的 op 路径（不能只靠 hub 
     assert.match(r.error, /不在允许的目录范围/, r.error);
     assert.ok(!fs.existsSync(victim), '★ 越界时不得产生任何文件');
 });
+
+test('★ 守卫是**表驱动**的：表里加一条规则，护栏自动生效（不用改任何 op 代码）', () => {
+    // ⚠️ 这一条守的是「新增 op 时忘了写守卫调用」这个病 ——
+    //    之前每个 op 在自己的处理函数里手写一行 assertOpPathAllowed，
+    //    忘了写 → 那道护栏静默失效（看着有、其实没有）。
+    //    现在改成由表驱动：**新增 op 只要在 OP_PATH_FIELDS 里加一行**。
+    const { OP_PATH_FIELDS } = require('../src/offline/ops');
+    const project = tmpdir();
+    const outside = tmpdir();
+    const prefab = path.join(project, 'a.prefab');
+    writeJson(prefab, makePrefab());
+    const victim = path.join(outside, 'victim.txt');
+
+    // 假装新增了一个 op 的路径字段（这里借 set-label-text 的 text 顶一下）
+    OP_PATH_FIELDS.push({ op: 'set-label-text', field: 'text' });
+    try {
+        const r = offline.editPrefab({
+            filePath: prefab,
+            allowedRoots: [project],
+            ops: [{ op: 'set-label-text', node: 'Child', text: victim }],
+        });
+        assert.ok(!r.ok, '★ 表里加一条规则后，护栏必须自动生效');
+        assert.match(r.error, /不在允许的目录范围/, r.error);
+        assert.ok(!fs.existsSync(victim), '★ 越界时不得产生任何文件');
+    } finally {
+        OP_PATH_FIELDS.pop(); // 还原，别影响别的用例
+    }
+});
+
+test('★ anim 执行器也走同一张表（将来新增带文件路径的 anim op 时护栏自动生效）', () => {
+    const { OP_PATH_FIELDS } = require('../src/offline/ops');
+    const project = tmpdir();
+    const outside = tmpdir();
+    const anim = path.join(project, 'a.anim');
+    // ⚠️ 夹具就地造 —— 不要 require 别的测试文件：
+    //    那样会把那个文件的**全部用例**注册到本文件里（测试互相污染）。
+    writeJson(anim, [
+        { __type__: 'cc.AnimationClip', _name: 'idle', duration: 2, sample: 60, tracks: [{ __id__: 1 }] },
+        { __type__: 'cc.animation.RealTrack', path: 'Root/Child', _channel: { __id__: 2 } },
+        {
+            __type__: 'cc.RealCurve',
+            data: [
+                { __type__: 'cc.RealKeyframeValue', value: 0, time: 0 },
+                { __type__: 'cc.RealKeyframeValue', value: 100, time: 1 },
+            ],
+        },
+    ]);
+    const victim = path.join(outside, 'victim.txt');
+
+    OP_PATH_FIELDS.push({ op: 'offset-curve', field: 'path' });
+    try {
+        const r = offline.editAnimation({
+            filePath: anim,
+            allowedRoots: [project],
+            ops: [{ op: 'offset-curve', path: victim, offset: 5 }],
+        });
+        assert.ok(!r.ok, '★ anim 侧也必须按表拦住');
+        assert.match(r.error, /不在允许的目录范围/, r.error);
+    } finally {
+        OP_PATH_FIELDS.pop();
+    }
+});
