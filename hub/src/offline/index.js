@@ -516,14 +516,25 @@ function batchMultiFile(files, args) {
     const results = [];
     for (let i = 0; i < prepared.length; i++) {
         const p = prepared[i];
+        // ⚠️ 每项的字段要和**单文件**模式一致 ——
+        //    之前多文件少了 diff / steps，消费方读它们会静默拿到 undefined。
+        //    两种模式是同一个工具的两种形态，响应契约不该分叉。
+        const base = {
+            filePath: p.file.filePath,
+            ok: true,
+            changed: p.plan.allChanges.length,
+            diff: p.plan.allChanges,
+            steps: p.plan.steps,
+            written: [],
+        };
         if (!p.plan.allChanges.length) {
             // 零效果的 op 不写盘（和单文件模式一致）
-            results.push({ filePath: p.file.filePath, ok: true, changed: 0, written: [], noop: true });
+            results.push({ ...base, noop: true });
             continue;
         }
         try {
             const written = commitPrepared(p.plan);
-            results.push({ filePath: p.file.filePath, ok: true, changed: p.plan.allChanges.length, written });
+            results.push({ ...base, written });
         } catch (e) {
             const rolled = rollbackPrepared(prepared.slice(0, i));
             return err(

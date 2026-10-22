@@ -12,7 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const offline = require('../index');
-const { setPath, splitPath } = require('../ops');
+const { setPath, splitPath, getPath } = require('../ops');
 const { compressUUID, decompressUUID, isCompressedUUID, deterministicFileId, deterministicUuid } = require('../id');
 
 // ────────────────────────────── fixture ──────────────────────────────
@@ -736,9 +736,15 @@ test('★ 数组末段是下标时要替换元素，不能写成元素上的字�
     assert.strictEqual(Object.prototype.hasOwnProperty.call(label._items[0], '0'), false);
 });
 
-test('setPath / splitPath 是导出的，直接调用也要守住原型链', () => {
+test('setPath / splitPath / getPath 是导出的，直接调用也要守住原型链', () => {
     assert.throws(() => splitPath('__proto__'), /保留段/);
     assert.throws(() => splitPath('a.constructor.b'), /保留段/);
+    // ⚠️ getPath 也要有自己的用例 ——
+    //    变异验证发现：拆掉 getPath 的守卫**没有任何用例变红**
+    //    （因为其它层都在兜，看起来是「纵深防御」，
+    //      但那一层实际上从来没被独立验证过 —— 万一以后有人删掉别的层，它就是裸的）。
+    assert.throws(() => getPath({ a: {} }, ['__proto__']), /保留段/);
+    assert.throws(() => getPath({ a: {} }, ['a', 'constructor']), /保留段/);
     const o = { a: {} };
     assert.throws(() => setPath(o, ['a', '__proto__', 'x'], 1), /保留段/);
     assert.strictEqual({}.x, undefined, '★ 不得污染全局原型');
@@ -747,6 +753,7 @@ test('setPath / splitPath 是导出的，直接调用也要守住原型链', () 
     const o2 = { _lpos: { x: 0 } };
     assert.strictEqual(setPath(o2, ['_lpos', 'x'], 5), true);
     assert.strictEqual(o2._lpos.x, 5);
+    assert.strictEqual(getPath(o2, ['_lpos', 'x']), 5);
 });
 
 test('setPath 不得穿过继承来的对象（模块是可复用的，要纵深防御）', () => {
@@ -1035,6 +1042,28 @@ test('★ 离线读路径（queryPrefab / queryAnimation）也必须过目录白
     writeJson(inside, makePrefab());
     const r3 = offline.queryPrefab({ filePath: inside, selector: 'tree', allowedRoots: [allowed] });
     assert.ok(r3.ok, r3.error);
+});
+
+test('★ add-component 的 props 键不许是保留段（这是唯一不经 splitPath 的键写入）', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    writeJson(f, makePrefab());
+    const before = fs.readFileSync(f, 'utf8');
+
+    // ⚠️ 用 JSON.parse 造出**自有**的 __proto__ 键 ——
+    //    JS 字面量 {__proto__: …} 造出来的是原型设置，不是自有键，
+    //    用字面量测会得出假阴性（看起来没被污染，其实根本没走到那条路径）。
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+        const props = JSON.parse(`{"${key}": {"POLLUTE": "yes"}}`);
+        const r = offline.editPrefab({
+            filePath: f,
+            ops: [{ op: 'add-component', node: 'Child', component: 'cc.Sprite', props }],
+        });
+        assert.ok(!r.ok, `props.${key} 必须被拒绝`);
+        assert.match(r.error, /保留段/, r.error);
+    }
+    assert.strictEqual({}.POLLUTE, undefined, '★ 不得污染全局原型');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, '★ 磁盘不得有任何写入');
 });
 
 test('★ planMetaWrite：保留已有 .meta 的全部字段', () => {

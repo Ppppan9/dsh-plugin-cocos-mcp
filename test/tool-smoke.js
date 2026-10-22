@@ -18,6 +18,7 @@ const fs = require('fs');
 const os = require('os');
 
 const HUB = path.join(__dirname, '..', 'hub', 'bin.js');
+const { exitCodeFor } = require('./smoke-exit');
 const AS_JSON = process.argv.includes('--json');
 const WITH_BUILD = process.argv.includes('--with-build');
 
@@ -115,7 +116,7 @@ class McpClient {
 function log(...a) { if (!AS_JSON) console.log(...a); }
 
 /**
- * 「引擎侧 scene 频道中毒」的判定特征。
+ * 「scene 频道不可用」的判定特征。
  *
  * ⚠️ 只认这两个**精确**特征，别放宽 ——
  *    放宽了会把真正的 bug（比如某个工具返回了奇怪的错误）也当成引擎缺陷吞掉，
@@ -123,13 +124,31 @@ function log(...a) { if (!AS_JSON) console.log(...a); }
  *
  * 背景见调研报告 6.8 / 6.11 / 6.14：一次 scene:open-scene 挂死之后，
  * 整个 scene 频道就不再回应，此后所有场景操作都会以同样的信息失败。
- * 这是 **Cocos 引擎自身的缺陷**，不是本项目的 bug。
+ *
+ * ⚠️ **两个特征不是一回事，理由也必须分开** ——
+ *    「已经卡死」= 引擎侧彻底死了（调研报告 6.14）；
+ *    「暂时无响应」= 编辑器正忙（启动时 auto refresh / 构建 / 批量导入），
+ *    它自己的文案就写着「稍后重试即可」——
+ *    把它报成「引擎缺陷」是**报告不准**：人看到「引擎缺陷」就不会再查了。
  */
-const POISON_PATTERNS = [/场景频道\*\*暂时无响应\*\*/, /场景频道已经卡死/];
+const POISON_PATTERNS = [
+    {
+        re: /场景频道\*\*暂时无响应\*\*/,
+        reason: '暂态：scene 频道暂时无响应（编辑器正忙，如启动时自动刷新），本轮未跑完',
+    },
+    {
+        re: /场景频道已经卡死/,
+        reason: '引擎缺陷：scene 频道已卡死（调研报告 6.14），本轮未跑完',
+    },
+];
 
-function isPoisonError(text) {
+/** 命中哪个特征 → 返回它的理由；一个都不命中 → null（是真失败）。 */
+function poisonReason(text) {
     const s = String(text || '');
-    return POISON_PATTERNS.some((re) => re.test(s));
+    for (const p of POISON_PATTERNS) {
+        if (p.re.test(s)) return p.reason;
+    }
+    return null;
 }
 
 /**
@@ -159,19 +178,14 @@ async function check(name, args, opts = {}) {
     const ms = Date.now() - t0;
     const rejected = !!r.isError;
     // ⚠️ 引擎缺陷与真 bug 必须分开记 ——
-    //    引擎侧 scene 频道中毒会让后续几十个场景检查以**同一条信息**失败。
+    //    scene 频道不可用会让后续几十个场景检查以**同一条信息**失败。
     //    把它们算作「失败」，等于把「一个根因」变成「几十个症状」——
     //    既看不清问题，也会让冒烟测试的红绿失去意义（真正的回归会被淹没）。
     //    这里只认精确特征，所以真正的回归仍然是失败。
-    if (rejected && isPoisonError(r.text)) {
-        results.push({
-            name,
-            status: 'skip',
-            ms,
-            detail: firstLine(r.text),
-            reason: '引擎缺陷：scene 频道中毒（调研报告 6.14）',
-        });
-        log(`  ⏭ ${name.padEnd(22)} ${String(ms).padStart(6)}ms  跳过：引擎缺陷 · scene 频道中毒`);
+    const reason = rejected ? poisonReason(r.text) : null;
+    if (reason) {
+        results.push({ name, status: 'skip', ms, detail: firstLine(r.text), reason });
+        log(`  ⏭ ${name.padEnd(22)} ${String(ms).padStart(6)}ms  跳过：${reason}`);
         return r;
     }
     const pass = opts.expectError ? rejected : !rejected;
@@ -520,9 +534,20 @@ async function main() {
         await check('scene.open', { uuid: back.data && back.data.uuid ? back.data.uuid : back.data });
         await new Promise((r) => setTimeout(r, 1200));
     }
-    // 切回之后，本轮建出来的场景不再是「当前场景」，这时才删得掉
+    // 切回之后，本轮建出来的场景不再是「当前场景」，这时才删得掉。
+    //
+    // ⚠️ 这里用 assert() 而不是 check() ——
+    //    check() 命中「频道不可用」的特征会记成 **skip**，
+    //    那就意味着「临时场景没删掉」被当成引擎的锅悄悄吞掉，
+    //    而它其实**真的留在用户的 assets/scenes/ 里**了。
+    //    残留是真实的问题，必须报成失败。
     if (cs.length) {
-        await check('asset.delete', { url: cs[0].url, confirm: true });
+        const del = await client.call('asset.delete', { url: cs[0].url, confirm: true });
+        assert(
+            !del.isError,
+            '本轮建出来的临时场景已清理（不能留在用户工程里）',
+            del.isError ? String(del.text).slice(0, 110) : '已删除'
+        );
     }
 
     // ⚠️ 根节点守卫要用**当前**场景的根节点名 ——
@@ -539,13 +564,6 @@ async function main() {
         } else {
             log('  ⚠️  读不到当前场景根节点，跳过根节点守卫检查');
         }
-        // 清理本轮建出来的场景资源
-        if (sceneName) {
-            const sc2 = await client.call('asset.query', { pattern: `db://assets/scenes/${sceneName}.scene` });
-            for (const a of (sc2.data && sc2.data.assets) || []) {
-                await client.call('asset.delete', { url: a.url, confirm: true });
-            }
-        }
         // 关闭场景放最后（引擎可能拒绝 → 明确报错，不报假成功）
         const closeRes2 = await client.call('scene.close', { confirm: true });
         assert(
@@ -553,6 +571,28 @@ async function main() {
             'scene.close 不报假成功（引擎拒绝关闭时要明确说出来）',
             closeRes2.isError ? String(closeRes2.text).slice(0, 100) : '已关闭'
         );
+    }
+
+    // ⚠️ 兜底清理：上面那次删除如果没成功，**无论如何**都要再试一次 ——
+    //    之前这个兜底写在「频道健康」的 else 分支里，
+    //    频道一中毒就不执行 → 临时场景留在用户工程里，而报告是绿的。
+    //    asset-db 频道与 scene 频道是两条独立的路，频道中毒时它照样能用。
+    if (sceneName) {
+        const sc2 = await client.call('asset.query', { pattern: `db://assets/scenes/${sceneName}.scene` });
+        const leftovers = (sc2.data && sc2.data.assets) || [];
+        for (const a of leftovers) {
+            const d = await client.call('asset.delete', { url: a.url, confirm: true });
+            if (!d.isError) log(`  ℹ️  兜底清理：已删除残留场景 ${a.url}`);
+        }
+        if (leftovers.length) {
+            const still = await client.call('asset.query', { pattern: `db://assets/scenes/${sceneName}.scene` });
+            const remain = ((still.data && still.data.assets) || []).length;
+            assert(
+                remain === 0,
+                '本轮建出来的临时场景已清理（不能留在用户工程里）',
+                remain ? `仍有 ${remain} 个残留：${sceneName}.scene` : '已清理'
+            );
+        }
     }
 
     // ── 汇总 ──
@@ -570,7 +610,7 @@ async function main() {
     if (skipped.length) {
         // ⚠️ 跳过项必须**显式说明**，不能悄悄消失 ——
         //    「本轮没测到」和「测了没问题」是两回事，混在一起就是自欺欺人。
-        console.log('\n跳过明细（引擎缺陷，不是本项目的 bug —— 但本轮这些场景检查没覆盖到）：');
+        console.log('\n跳过明细（本轮这些场景检查**没覆盖到** —— 不是「测了没问题」）：');
         const byReason = new Map();
         for (const s of skipped) {
             if (!byReason.has(s.reason)) byReason.set(s.reason, []);
@@ -580,6 +620,13 @@ async function main() {
             console.log(`  ⏭ ${reason}：${names.length} 项 —— ${names.join(', ')}`);
         }
         console.log('  ⇒ 要拿到完整的场景覆盖，需要重启 Cocos Creator 后重跑（编辑器是单实例）。');
+        // ⚠️ **健康闸门不区分根因** ——
+        //    这两条特征是本项目自己的闸门打出来的，引擎挂了会打，
+        //    但「本项目的 bug 把频道搞死」打出来的是**同一句话**。
+        //    所以这里**不能**断言「一定是引擎的锅」——
+        //    退出码会单独标成「未跑完」，让 CI 不要把它当成通过。
+        console.log('  ⚠️ 健康闸门不区分根因 —— 引擎挂死与本项目的 bug 打的是同一句话。');
+        console.log('     本轮按引擎缺陷记账，但退出码会标成「未跑完」，不当成通过。');
     }
 
     if (failed.length) {
@@ -601,11 +648,21 @@ async function main() {
 
     if (AS_JSON) process.stdout.write(JSON.stringify({ results, notCovered }, null, 2) + '\n');
     client.close();
-    process.exit(failed.length ? 1 : 0);
+    // ⚠️ 退出码要能区分**三件事** ——
+    //   0 = 全部通过
+    //   1 = 有真失败（真回归）
+    //   2 = 没有失败，但有跳过 —— **本轮没跑完**
+    //
+    // 之前 skip 不计入失败、退出码只看 failed → 频道一中毒就退出 0 → CI 判绿。
+    // 而健康闸门**不区分根因**：引擎挂死和「本项目的 bug 把频道搞死」
+    // 打出来的是同一句话，两者会被一起吞掉。
+    // ⇒ 有跳过时必须用**独立退出码**，让 CI 把它读成「未跑完」而不是「通过」。
+    process.exit(exitCodeFor(failed.length, skipped.length));
 }
 
 main().catch((e) => {
     console.error('冒烟测试中断：', e);
     if (client) client.close();
-    process.exit(2);
+    // ⚠️ 用 3 而不是 2 —— 2 已经表示「有跳过、本轮没跑完」了
+    process.exit(3);
 });

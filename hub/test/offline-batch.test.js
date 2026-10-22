@@ -248,3 +248,27 @@ test('★ hub 层 op 路径护栏：项目内的 op 路径正常放行', async (
     assert.ok(res, '项目内的路径必须放行');
     assert.ok(fs.existsSync(`${tex}.meta`), '应生成 .meta');
 });
+
+test('★ 多文件模式的响应契约要和单文件一致（每项都要有 diff / steps）', () => {
+    const dir = tmpdir();
+    const a = path.join(dir, 'a.prefab');
+    const b = path.join(dir, 'b.prefab');
+    writeJson(a, makePrefab());
+    writeJson(b, makePrefab());
+    const opsJson = makeOpsFile(dir, {
+        files: [
+            { filePath: a, ops: [{ op: 'set-label-text', node: 'Child', text: 'A' }] },
+            { filePath: b, ops: [{ op: 'set-label-text', node: 'Child', text: 'B' }] },
+        ],
+    });
+    const r = offline.batchPrefab({ opsJsonPath: opsJson, allowedRoots: [dir] });
+    assert.ok(r.ok, r.error);
+    assert.strictEqual(r.data.mode, 'multi');
+    for (const item of r.data.files) {
+        assert.ok(Array.isArray(item.diff), `★ ${item.filePath} 缺 diff`);
+        assert.ok(Array.isArray(item.steps), `★ ${item.filePath} 缺 steps`);
+        assert.ok(item.diff.length > 0, '★ diff 不该是空的');
+        assert.ok(item.steps.length > 0, '★ steps 不该是空的');
+        assert.strictEqual(item.ok, true);
+    }
+});

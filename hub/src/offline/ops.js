@@ -1116,7 +1116,17 @@ function addComponentInternal(ctx, nodeIndex, componentType, props) {
     const idx = ctx.data.length;
     const comp = { __type__: type };
     if (props && isPlainObject(props)) {
-        for (const [k, v] of Object.entries(props)) comp[k] = v;
+        for (const [k, v] of Object.entries(props)) {
+            // ⚠️ props 的键是**用户可控**的，且这是离线模块里唯一
+            //    一处不经 splitPath 的键写入 ——
+            //    `props.__proto__` 会触发原型 setter（换掉新组件元素的原型，
+            //    键被静默丢弃 → **报成功但零效果**）；
+            //    `props.constructor` 会写出一个**引擎不认的自有字段**，
+            //    持久化进用户的 prefab 文件。
+            //    直接拒掉这三个名字（prefab 里不可能有这种字段）。
+            assertSafePathSegments([k], `组件 ${type} 的 props 字段`);
+            comp[k] = v;
+        }
     }
     ctx.data.push(comp);
     const nodeEl = ctx.data[nodeIndex];

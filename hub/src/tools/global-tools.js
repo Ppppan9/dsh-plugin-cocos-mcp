@@ -470,4 +470,16 @@ function assertOpPathsInsideProject(ctx, ops, label = 'op 内路径') {
     }
 }
 
-module.exports = { GLOBAL_TOOLS, assertInsideProject, assertOpPathsInsideProject, projectRoots, realpathBestEffort };
+module.exports = {
+    GLOBAL_TOOLS,
+    assertInsideProject,
+    assertOpPathsInsideProject,
+    projectRoots,
+    realpathBestEffort,
+    // ⚠️ 导出 OP_PATH_FIELDS —— 它是一份**手工维护的白名单**，
+    //    新增带路径字段的 op 时忘了加，就会复现本轮修的那种
+    //    「看着有、其实没有」的护栏。
+    //    导出它是为了让一致性测试能自动发现漏项（见
+    //    hub/test/offline-guard-wiring.test.js）。
+    OP_PATH_FIELDS,
+};
