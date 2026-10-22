@@ -12,6 +12,19 @@
  */
 
 const { spawn } = require('child_process');
+
+// ⚠️⚠️ **被 test runner 自动拉起来时必须立刻退出** ——
+//    `node --test`（不带路径参数）会把 **test/ 目录下所有 .js** 都当测试文件
+//    自动发现并执行 —— 包括这个**真机脚本**。那会意外连上本机开着的
+//    Cocos Creator、动用户的工程（第 8 轮独立复审真踩到了两次，
+//    而且它无法 100% 证明没碰到）。
+//    ⇒ 被 NODE_TEST_CONTEXT 标记为 test runner 时，直接退出；
+//      只有**显式当脚本跑**（npm run test:smoke / node test/xxx.js）才动。
+if (process.env.NODE_TEST_CONTEXT) {
+    console.error('（跳过：这是真机脚本，需要显式运行，例如 npm run test:smoke）');
+    process.exit(EXIT.OK);
+}
+
 const { requireSceneChannel } = require('./editor-health');
 const { EXIT } = require('./exit-codes');
 const path = require('path');

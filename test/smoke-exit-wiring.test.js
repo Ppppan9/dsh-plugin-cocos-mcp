@@ -31,11 +31,23 @@ const SMOKE = path.join(__dirname, 'tool-smoke.js');
  * @param {number} skipped 跳过条数
  * @param {number} leftover 残留条数
  */
+/**
+ * ⚠️ spawn 时必须**去掉 NODE_TEST_CONTEXT** ——
+ *    那个标记表示「我是被 test runner 自动发现拉起来的」。
+ *    脚本里有守卫：带着这个标记就立刻退出（那正是守卫的用途）。
+ *    而这里要的是「把它**当脚本**跑」，所以要把标记摘掉。
+ */
+function scriptEnv() {
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    return env;
+}
+
 function runSmokeExit(failed, skipped, leftover) {
     const r = spawnSync(
         process.execPath,
         [SMOKE, `--selftest-exit=${failed},${skipped},${leftover}`],
-        { encoding: 'utf8', timeout: 30000 }
+        { encoding: 'utf8', timeout: 30000, env: scriptEnv() }
     );
     return r;
 }
@@ -77,7 +89,7 @@ test('★ 真实调用点必须把 client.close() 作为 cleanup 传进去（漏
     //    把那个实参改成 null → 客户端永远不被关掉（CI 上漏进程），
     //    而**退出码不变**（process.exit 紧跟其后）→ 光看退出码测不出来。
     //    假客户端 close() 时会往 stderr 打标记，靠它来验。
-    const r = spawnSync(process.execPath, [SMOKE, '--selftest-wire'], { encoding: 'utf8', timeout: 60000 });
+    const r = spawnSync(process.execPath, [SMOKE, '--selftest-wire'], { encoding: 'utf8', timeout: 60000, env: scriptEnv() });
     assert.match(
         String(r.stderr || ''),
         /FAKE_CLIENT_CLOSED/,
@@ -87,7 +99,11 @@ test('★ 真实调用点必须把 client.close() 作为 cleanup 传进去（漏
 
 test('★ 自测模式必须**最先**执行（挪到 main() 之后会先干等真机）', () => {
     // 靠「标记是不是第一行」做行为验证，不必解析源码。
-    const r = spawnSync(process.execPath, [SMOKE, '--selftest-exit=0,0,0'], { encoding: 'utf8', timeout: 60000 });
+    const r = spawnSync(process.execPath, [SMOKE, '--selftest-exit=0,0,0'], {
+        encoding: 'utf8',
+        timeout: 60000,
+        env: scriptEnv(),
+    });
     const first = String(r.stdout || '').split('\n').map((x) => x.trim()).filter(Boolean)[0];
     assert.strictEqual(first, 'SELFTEST_EXIT_MODE', '★ 自测模式必须是第一件事（否则会先跑一遍真实流程）');
 });
@@ -100,7 +116,7 @@ test('★ 真实流程里那个 finish() 调用不能被删（不然脚本不打
     //
     // ⇒ 这里用**假 MCP 客户端**（test/fake-mcp-client.js）让真实的 main() 流程跑一遍，
     //    走的就是真实路径里那个调用。
-    const r = spawnSync(process.execPath, [SMOKE, '--selftest-wire'], { encoding: 'utf8', timeout: 60000 });
+    const r = spawnSync(process.execPath, [SMOKE, '--selftest-wire'], { encoding: 'utf8', timeout: 60000, env: scriptEnv() });
     assert.notStrictEqual(r.status, 0, '★ 真实流程这一轮应当以非 0 结束（假客户端让 expectError 检查失败）');
     assert.strictEqual(r.status, 1, '★ 应当是「有真失败」的退出码 1');
     assert.match(String(r.stdout || ''), /通过 \d+ \/ 失败 \d+/, '★ 必须真的打印了汇总');

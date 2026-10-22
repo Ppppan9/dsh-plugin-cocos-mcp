@@ -486,7 +486,7 @@ test('README 的验证章节：脚本存在，且可静态验证的数字与代�
     for (const f of [
         'test/e2e.js',
         'test/tool-smoke.js',
-        'test/real-behavior.test.js',
+        'test/real-behavior.js',
         'hub/test/transaction.test.js',
         'hub/src/offline/test/offline.test.js',
     ]) {
@@ -679,43 +679,48 @@ test('没有已注册项目时，路径护栏一律拒绝（不静默放行）',
 
 // ────────────────────────────── 单测清单 ──────────────────────────────
 
-test('★ 单测清单不能漏：新增的 *.test.js 必须进 npm test 的文件列表', () => {
-    // ⚠️ 为什么是**显式清单**而不是通配 ——
-    //    `test/*.test.js` 会把 `test/real-behavior.test.js` 也圈进来，
-    //    而那是个**真机**测试（要开着 Cocos Creator 才跑得了），
-    //    混进单测会让人以为单测挂了。
-    //    但显式清单有它自己的坑：**新加的测试文件忘了加进去 → 静默不跑**。
-    //    这条断言就是防这个 —— 漏了会自己变红。
-    const pkg = JSON.parse(read('package.json'));
-    const script = pkg.scripts.test;
-    // 真机脚本：需要开着的 Cocos Creator，本来就不该进单测
-    const REAL_MACHINE = new Set(['real-behavior.test.js']);
+test('★ 单测清单用通配（新增测试文件自动纳入）+ 真机脚本必须带守卫', () => {
+    // ⚠️ 真机脚本**不叫 .test.js** ——
+    //    `node --test`（不传文件参数）会**自动发现** test/ 下所有 *.test.js。
+    //    真机脚本要是叫 *.test.js，一次手滑的 `node --test` 就会
+    //    把它跑起来 —— 连带去连本机开着的 Cocos Creator（第 8 轮复审真踩到了）。
+    //    ⇒ 真机脚本统一叫 `xxx.js`，单测统一叫 `xxx.test.js`。
     const files = fs.readdirSync(path.join(ROOT, 'test')).filter((f) => f.endsWith('.test.js'));
     assert.ok(files.length >= 3, 'test/ 下应该有多份单测');
-    for (const f of files) {
-        if (REAL_MACHINE.has(f)) {
-            assert.ok(
-                !script.includes(f),
-                `test/${f} 是真机测试，不该进 npm test 的单测清单（会让人以为单测挂了）`
-            );
-            continue;
-        }
-        assert.ok(
-            script.includes(f),
-            `test/${f} 没有进 package.json 的 test 脚本 —— 新增的测试文件忘了加进去会**静默不跑**`
+    // 反过来：**真机脚本**必须带守卫 ——
+    //    `node --test`（不带路径）会把 test/ 下**所有 .js** 都自动发现并执行，
+    //    真机脚本要是没有守卫，就会意外连上本机开着的 Cocos Creator、
+    //    动用户的工程（第 8 轮独立复审真踩到了两次，且无法 100% 证明没碰到）。
+    for (const f of ['e2e.js', 'tool-smoke.js', 'real-behavior.js']) {
+        const src = read(`test/${f}`);
+        assert.match(
+            src,
+            /process\.env\.NODE_TEST_CONTEXT/,
+            `test/${f} 是真机脚本，必须在 NODE_TEST_CONTEXT 下立刻退出` +
+            '（否则 node --test 的自动发现会意外连上本机开着的编辑器）'
         );
     }
+    // 单测清单用通配 `test/*.test.js` → 新增的测试文件**自动**被纳入，
+    // 不会再出现「忘了加进清单 → 静默不跑」。
+    const pkg = JSON.parse(read('package.json'));
+    assert.match(pkg.scripts.test, /test\/\*\.test\.js/, '单测清单必须用通配，新测试文件才会自动被纳入');
 });
 
 test('★ README 描述的单测范围要跟 package.json 实际跑的一致', () => {
+    // 两边必须**同时**是通配，或同时是显式清单 ——
+    // 不一致会让人以为新加的测试文件会自动被跑（其实不会，静默不跑）。
     const pkg = JSON.parse(read('package.json'));
     const script = pkg.scripts.test;
-    // README 说「test/*.test.js」时，实际必须是显式清单（因为真机脚本被排除了）——
-    //   两者不一致会让人以为新加的测试会自动被跑。
-    if (/test\/\*\.test\.js/.test(readme)) {
-        assert.ok(
-            !/test\/\*\.test\.js\s/.test(script.replace(/test\/[^*]+\.test\.js/g, '')),
-            'README 说单测范围是 test/*.test.js，但 package.json 实际是显式清单 —— 说法要改成实际的'
-        );
-    }
+    const readmeSaysGlob = /test\/\*\.test\.js/.test(readme);
+    const scriptUsesGlob = /test\/\*\.test\.js/.test(script);
+    assert.strictEqual(
+        readmeSaysGlob,
+        scriptUsesGlob,
+        'README 描述的单测范围与 package.json 实际跑的不一致（一个用通配、一个用显式清单）'
+    );
+    // 并且：单测清单里不该出现真机脚本
+    assert.ok(
+        !/real-behavior/.test(script),
+        '单测清单里不该有真机脚本（它要开着 Cocos Creator 才跑得了）'
+    );
 });
