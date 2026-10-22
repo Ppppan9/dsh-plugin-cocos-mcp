@@ -546,6 +546,55 @@ function findComponentIndex(nodeDump, compType) {
  */
 const SCENE_SCRIPT_METHODS = ['getSceneSummary', 'findNodesByName', 'getNodeInfo', 'getWorldBounds', 'setNodeProperty', 'createNode'];
 
+/**
+ * 必须过 `db://assets/` 护栏的 op 及其路径字段（**表驱动**，唯一真相）。
+ *
+ * ⚠️ 为什么要改成表驱动：
+ *    之前是**每个 handler 在函数体里手写一行** `requireAssetUrl(args.url)` ——
+ *    新增一个带路径的 op 忘了写，那道护栏就**静默失效**
+ *    （跟离线层 `OP_PATH_FIELDS` 之前那个病一模一样：
+ *      代码里有护栏、注释也写着有，但实际从来没生效）。
+ *    ⇒ 现在护栏**由表自动施加**（见 createHandlers 末尾）：
+ *      新增 op 只要在表里加一行，护栏自动生效；
+ *      **忘了加表 ⇒ 一致性测试会红**（hub/test/extension-handlers.test.js）。
+ *
+ * ⚠️ 「哪些字段算路径」的口径见 NOT_ASSET_PATH_FIELDS ——
+ *    那个表和这张表是一对，必须**二选一**。
+ */
+const ASSET_PATH_FIELDS = {
+    // 读 .meta 文件 → 会碰到文件系统 → 必须限定在 db://assets/ 内
+    'asset.isImported': ['url'],
+    // 写文件 → 必须限定在 db://assets/ 内
+    'asset.create': ['url'],
+    'asset.save': ['url'],
+    'asset.delete': ['url'],
+    'asset.move': ['from', 'to'],
+    'asset.copy': ['from', 'to'],
+};
+
+/**
+ * 明确**不需要** `db://assets/` 护栏的 op/字段（写清楚理由，免得下次又要猜）。
+ *
+ * ⚠️ 这张表和 ASSET_PATH_FIELDS 是一对 ——
+ *    「带路径字段的 op」必须**二选一**：
+ *    要么进 ASSET_PATH_FIELDS（要过护栏），
+ *    要么进这张表并写明为什么不需要。
+ *    两张表都没有 ⇒ 一致性测试报错（不会「默默地漏掉」）。
+ *
+ * ⚠️ 判断依据是**扩展端会不会拿它去碰文件系统**：
+ *    只当「资源库里的 key」传给引擎的，不需要护栏；
+ *    会拼成文件路径去读/写的，必须护栏。
+ */
+const NOT_ASSET_PATH_FIELDS = {
+    'asset.info.url': '只作为资源库里的 key 查元信息，扩展端不碰文件系统',
+    'asset.uuid.url': '只作为 key 把路径换成 uuid',
+    'asset.path.url': '只作为 key 查库里记录的路径字段',
+    'asset.dependencies.url': '只作为 key 查依赖',
+    'asset.users.url': '只作为 key 查引用者',
+    'asset.reimport.url': '只触发引擎按 key 重新导入，不会创建/写入文件',
+    'asset.refresh.url': '只触发引擎按 key 刷新，不会创建/写入文件',
+};
+
 function createHandlers(ctx) {
     /**
      * 必填参数校验。
@@ -1308,7 +1357,8 @@ function createHandlers(ctx) {
                 throw new Error('asset.isImported 缺少必填参数：url 或 uuid');
             }
             if (hasUrl) {
-                requireAssetUrl(args.url);
+                // ⚠️ 路径护栏由 ASSET_PATH_FIELDS 表**统一施加**（不在这里手写）——
+                //    每处手写一遍，迟早会漏掉一个 op（第 10 轮复审 G-7）。
                 return await isImported(args.url);
             }
             if (!isUuidLike(args.uuid)) {
@@ -1332,7 +1382,6 @@ function createHandlers(ctx) {
 
         'asset.create': async (args) => {
             req(args, ['url'], 'asset.create');
-            requireAssetUrl(args.url);
             // asset-db:create-asset 的第三个参数是 AssetOperationOption，
             // overwrite 决定同名资源已存在时是覆盖还是报错。
             const options = args.overwrite ? { overwrite: true } : undefined;
@@ -1348,14 +1397,12 @@ function createHandlers(ctx) {
 
         'asset.save': async (args) => {
             req(args, ['url', 'content'], 'asset.save');
-            requireAssetUrl(args.url);
             const r = await send('asset-db', 'save-asset', [args.url, args.content]);
             return { saved: args.url, info: r };
         },
 
         'asset.delete': async (args) => {
             req(args, ['url'], 'asset.delete');
-            requireAssetUrl(args.url);
             // ⚠️ **别删掉当前打开的场景** ——
             //    删掉之后编辑器里会留一个指向已删除资源的「上一个场景」，
             //    引擎在打开下一个场景时会先处理它、失败、然后 open-scene 永不返回
@@ -1394,20 +1441,17 @@ function createHandlers(ctx) {
 
         'asset.move': async (args) => {
             req(args, ['from', 'to'], 'asset.move');
-            requireAssetUrl(args.from);
-            requireAssetUrl(args.to);
             const r = await send('asset-db', 'move-asset', [args.from, args.to]);
             return { from: args.from, to: args.to, info: r };
         },
 
         'asset.copy': async (args) => {
-            // ⚠️ 同族的 move / create / save / delete 都过 requireAssetUrl，只有 copy 没有 ——
-            //    那等于把「复制任意路径」的能力透给了模型。
+            // ⚠️ 同族的 move / create / save / delete 都要过 requireAssetUrl，
+            //    而 copy 之前**没有** —— 那等于把「复制任意路径」的能力透给了模型。
             //    （引擎侧到底接不接受非 db:// 的 URL，没法离线证实；
             //      但纵深防御不依赖引擎的实现细节 —— 自己的口子自己堵上。）
+            //    ⚠️ 护栏现在由 ASSET_PATH_FIELDS 表统一施加，不再在这里手写。
             req(args, ['from', 'to'], 'asset.copy');
-            requireAssetUrl(args.from);
-            requireAssetUrl(args.to);
             const r = await send('asset-db', 'copy-asset', [args.from, args.to]);
             return { from: args.from, to: args.to, info: r };
         },
@@ -1594,6 +1638,35 @@ function createHandlers(ctx) {
         },
     };
 
+    // ─────────────────────────────────────────────────────────────
+    // 路径护栏：**由表自动施加**（唯一真相 = ASSET_PATH_FIELDS）
+    // ─────────────────────────────────────────────────────────────
+    // ⚠️ 为什么不写在各个 handler 里：
+    //    手写 = 每加一个 op 都要记得写一遍，忘了就**静默失效**
+    //    （代码里有护栏、注释也写着有，但实际从来没生效 ——
+    //      第 10 轮复审 G-7 实测：那份手写枚举的测试表就漏了 asset.isImported）。
+    //    ⇒ 表驱动之后，「忘了加表」会被一致性测试抓住（不是靠人记得）。
+    //
+    // ⚠️ 顺序说明：
+    //    护栏只拦「**有值但越界**」的情况；
+    //    缺参数（undefined / null / ''）**不在这里拦** ——
+    //    交给 handler 自己的必填校验去报，信息更准，也和以前的顺序一致。
+    //    （唯一会变的是「路径越界 + 另一个参数也缺」这种双错情况：
+    //      现在先报越界（安全优先），以前先报缺参数 —— 都对，顺序不同。）
+    for (const [op, fields] of Object.entries(ASSET_PATH_FIELDS)) {
+        const fn = ops[op];
+        if (typeof fn !== 'function') continue; // 表里有、handler 没有 ⇒ 一致性测试会红
+        ops[op] = async (args) => {
+            const a = args || {};
+            for (const f of fields) {
+                const v = a[f];
+                if (v === undefined || v === null || v === '') continue;
+                requireAssetUrl(v);
+            }
+            return fn(args);
+        };
+    }
+
     return ops;
 }
 
@@ -1665,6 +1738,15 @@ module.exports = {
      */
     sceneOpenBudgetMs,
     SCENE_SCRIPT_METHODS,
+    /**
+     * 必须过 `db://assets/` 护栏的 op/字段 —— **唯一真相**。
+     * 护栏由它自动施加；导出给一致性测试直接 require 求值（不要扫源码）。
+     */
+    ASSET_PATH_FIELDS,
+    /**
+     * 明确不需要护栏的 op/字段 + 理由（与 ASSET_PATH_FIELDS 二选一）。
+     */
+    NOT_ASSET_PATH_FIELDS,
     SCENE_OPEN_TIMEOUT_MS,
     SCENE_HEALTH_TIMEOUT_MS,
     SCENE_HEALTH_PROBE,

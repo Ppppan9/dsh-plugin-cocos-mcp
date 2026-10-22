@@ -17,7 +17,32 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { createHandlers } = require('../../extension/bridge/handlers');
+const { createHandlers, ASSET_PATH_FIELDS, NOT_ASSET_PATH_FIELDS } = require('../../extension/bridge/handlers');
+const { EDITOR_TOOLS } = require('../src/tools/editor-tools');
+
+/**
+ * 「带路径字段的扩展端 op」—— **从 hub 侧工具表结构化推导**。
+ *
+ * ⚠️ 为什么只取带 `op` 字段的工具：
+ *    工具表里分两类 —— 带 `op` 的是**扩展端 op**（真的会调引擎），
+ *    带 `handler` 的是 **hub 侧合成工具**（自己不动引擎，转手调扩展端 op）。
+ *    后者的路径参数最终会流到扩展端 op，由那边的护栏接管，
+ *    在这一层再单独立一份口径 = 两份真相。
+ */
+const PATHISH_FIELD = /^(url|from|to|path|file|dir|folder|uri)$/;
+
+function pathishFieldsByOp() {
+    const map = new Map();
+    for (const t of EDITOR_TOOLS) {
+        if (!t.op) continue; // hub 侧合成工具，不在这一层的口径里
+        const props = (t.inputSchema && t.inputSchema.properties) || {};
+        const fields = Object.keys(props).filter(
+            (f) => PATHISH_FIELD.test(f) && props[f] && props[f].type === 'string'
+        );
+        if (fields.length) map.set(t.op, fields);
+    }
+    return map;
+}
 
 /** 造一套假 ctx，记录发往引擎的每一条消息。 */
 function makeCtx(behaviors) {
@@ -128,18 +153,119 @@ test('★ asset.copy：缺参数要报清楚缺哪个', async () => {
     await assert.rejects(() => handlers['asset.copy']({}), /from|to/, '缺参数必须说清');
 });
 
-test('★ 资源类 op 越界都要被拒（逐个过一遍，不能有漏网的）', async () => {
+test('★ 资源类 op 越界都要被拒（**从表推导**，不能有漏网的）', async () => {
+    // ⚠️ 第 10 轮复审 G-7：这份用例原来是一份**手写枚举**（写死 5 条），
+    //    标题却写着「不能有漏网的」——
+    //    将来加一个带路径字段的 op（例：asset.rename）→ 不在表里 → 这条断言照样绿。
+    //    而它**当时就已经漏了一个**：asset.isImported 同样过 requireAssetUrl，却没被写进去。
+    //
+    // ⇒ 改成从 **ASSET_PATH_FIELDS 表**推导（require 求值，不扫源码）。
+    //    表是护栏的唯一真相（扩展端由它自动施加护栏），
+    //    这里再从表出发**逐条真的打一遍**，证明「表说有护栏 = 真的有护栏」。
     const { handlers, sent } = makeCtx();
-    const cases = [
-        ['asset.create', { url: '/etc/x', content: '{}' }],
-        ['asset.save', { url: '/etc/x', content: '{}' }],
-        ['asset.move', { from: '/etc/x', to: 'db://assets/y' }],
-        ['asset.delete', { url: '/etc/x' }],
-        ['asset.copy', { from: '/etc/x', to: 'db://assets/y' }],
-    ];
-    for (const [op, args] of cases) {
-        sent.length = 0;
-        await assert.rejects(() => handlers[op](args), /db:\/\/assets\//, `${op} 必须拒绝越界路径`);
-        assert.strictEqual(sent.length, 0, `${op} 越界时不得发出任何消息`);
+    const cases = [];
+    for (const [op, fields] of Object.entries(ASSET_PATH_FIELDS)) {
+        for (const f of fields) {
+            cases.push([op, f, { [f]: '/etc/x' }]);
+        }
     }
+    assert.ok(cases.length >= 8, `★ 表里只有 ${cases.length} 条，护栏覆盖 suspiciously 少`);
+    for (const [op, field, args] of cases) {
+        sent.length = 0;
+        await assert.rejects(
+            () => handlers[op](args),
+            /db:\/\/assets\//,
+            `★ ${op}.${field} 必须拒绝越界路径`
+        );
+        assert.strictEqual(sent.length, 0, `${op}.${field} 越界时不得发出任何消息`);
+    }
+});
+
+test('★ 两张表必须覆盖所有「带路径字段的扩展端 op」（漏表态就红）', () => {
+    // ⚠️ 判据必须来自**源头**（hub 侧工具表声明的参数），
+    //    不能是手写的一份 op 名单 —— 否则新加 op 时两张表会一起漏。
+    //
+    //    口径：
+    //      · 只看**扩展端 op**（工具表里带 op 字段的）——
+    //        hub 侧合成的工具（如 scene.create）不直接碰引擎，
+    //        它们转手调用的扩展端 op 才在口径里；
+    //      · 「路径字段」= 参数名像路径（url/from/to/path/…）且类型是 string。
+    const declared = new Map();
+    for (const [op, fields] of Object.entries(ASSET_PATH_FIELDS)) {
+        for (const f of fields) {
+            const key = `${op}.${f}`;
+            assert.ok(!declared.has(key), `★ ${key} 重复表态`);
+            declared.set(key, 'need');
+        }
+    }
+    for (const key of Object.keys(NOT_ASSET_PATH_FIELDS)) {
+        assert.ok(!declared.has(key), `★ ${key} 同时出现在两张表里（要护栏就别在豁免表里）`);
+        assert.ok(
+            String(NOT_ASSET_PATH_FIELDS[key]).trim().length >= 4,
+            `★ ${key} 的豁免理由太短 —— 必须写清为什么不需要护栏`
+        );
+        declared.set(key, 'skip');
+    }
+
+    // ① 正向：每个带路径字段的扩展端 op 都必须**表态**
+    for (const [op, fields] of pathishFieldsByOp()) {
+        for (const f of fields) {
+            assert.ok(
+                declared.has(`${op}.${f}`),
+                `★ ${op}.${f} 带路径字段，但两张表里都没表态：` +
+                '要护栏就进 ASSET_PATH_FIELDS，不要就进 NOT_ASSET_PATH_FIELDS 并写明理由'
+            );
+        }
+    }
+
+    // ② 反向：两张表里的每一项都必须真的存在于工具表里
+    //    （拼错的名字 = 护栏永远不会被触发 = 空转）
+    const universe = pathishFieldsByOp();
+    for (const key of declared.keys()) {
+        const dot = key.lastIndexOf('.');
+        const op = key.slice(0, dot);
+        const field = key.slice(dot + 1);
+        assert.ok(universe.has(op), `★ ${key} 的 op "${op}" 不在工具表里（拼错了？）`);
+        assert.ok(
+            universe.get(op).includes(field),
+            `★ ${key} 的字段 "${field}" 不是 ${op} 的路径字段（拼错了？）`
+        );
+    }
+});
+
+test('★ 护栏**由表自动施加**（不是每个 handler 自己记得写）', async () => {
+    // ⚠️ 这一条守住「表驱动」这个机制本身：
+    //    如果哪天有人改回「每个 handler 手写一行 requireAssetUrl」，
+    //    护栏会立刻从「自动」变成「靠人记得」——
+    //    而上面那条用例是**看不出**这个差别的（表还在、护栏也还在）。
+    //
+    //    做法：把**表里的一个 op 换掉**（塞一个不存在的字段名），
+    //    护栏就**不再施加**到它身上 ⇒ 那条 op 的越界路径会漏过去。
+    //    ⇒ 这能证明「护栏确实是从表来的」。
+    const sent = [];
+    const ctx = {
+        projectPath: '/tmp/proj',
+        msg(channel, message, ...args) {
+            sent.push({ channel, message, args });
+            return Promise.resolve({});
+        },
+    };
+    const saved = ASSET_PATH_FIELDS['asset.copy'];
+    try {
+        ASSET_PATH_FIELDS['asset.copy'] = ['__nonexistent_field__'];
+        const h2 = createHandlers(ctx);
+        sent.length = 0;
+        await h2['asset.copy']({ from: '/etc/x', to: 'db://assets/y' });
+        assert.strictEqual(sent.length, 1, '★ 表里换掉字段名后，护栏就不该再拦这个 op（说明护栏确实来自表）');
+        assert.strictEqual(sent[0].message, 'copy-asset');
+    } finally {
+        ASSET_PATH_FIELDS['asset.copy'] = saved;
+    }
+    // 还原后护栏必须恢复
+    const h3 = createHandlers(ctx);
+    await assert.rejects(
+        () => h3['asset.copy']({ from: '/etc/x', to: 'db://assets/y' }),
+        /db:\/\/assets\//,
+        '★ 表还原后护栏必须恢复'
+    );
 });

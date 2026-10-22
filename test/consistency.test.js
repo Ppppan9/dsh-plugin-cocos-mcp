@@ -864,18 +864,20 @@ test('★ node.create 的描述不能承诺「自动补 UITransform」（那条�
     assert.match(t.description, /components/, '描述应提示显式传 components');
 });
 
-test('★ 资源类 op 必须都过 requireAssetUrl（asset.copy 曾是同族里唯一的例外）', () => {
-    // ⚠️ 同族的 move/create/save/delete 都过 requireAssetUrl，
-    //    只有 copy 没有 —— 等于把「复制任意路径」的能力透给模型。
-    const src = read('extension/bridge/handlers.js');
-    for (const op of ['asset.create', 'asset.save', 'asset.move', 'asset.delete', 'asset.copy']) {
-        const i = src.indexOf(`'${op}':`);
-        assert.ok(i >= 0, `找不到 op ${op}`);
-        const body = src.slice(i, i + 900);
-        assert.match(
-            body,
-            /requireAssetUrl\(/,
-            `${op} 必须过 requireAssetUrl（否则等于把任意路径透给编辑器）`
-        );
+test('★ 资源类 op 的路径护栏：hub 工具表与扩展端护栏表必须对上（跨层一致性）', () => {
+    // ⚠️ 这条原来**扫源码**找 requireAssetUrl ——
+    //    ① 护栏改成表驱动之后，handler 体内本来就不该有那几行了，扫源码必然误报；
+    //    ② 扫源码是第 10 轮复审 G-4 点名的「判据建立在书写格式上」的检查（换写法就失效）。
+    // ⇒ 改成**跨层核对**（require 求值，不看源码文本）：
+    //    护栏表里的 op，hub 侧工具表里必须真的有这个 op ——
+    //    否则这道护栏保护的是一个**没人调得到**的方法（「看着有、其实没有」）。
+    const { ASSET_PATH_FIELDS, NOT_ASSET_PATH_FIELDS } = require('../extension/bridge/handlers');
+    const hubOps = new Set(EDITOR_TOOLS.map((t) => t.op).filter(Boolean));
+    for (const op of Object.keys(ASSET_PATH_FIELDS)) {
+        assert.ok(hubOps.has(op), `★ 护栏表里的 ${op} 在 hub 工具表里不存在 —— 这道护栏保护的是一个调不到的方法`);
+    }
+    for (const key of Object.keys(NOT_ASSET_PATH_FIELDS)) {
+        const op = key.slice(0, key.lastIndexOf('.'));
+        assert.ok(hubOps.has(op), `★ 豁免表里的 ${op} 在 hub 工具表里不存在（这条豁免是空的）`);
     }
 });
