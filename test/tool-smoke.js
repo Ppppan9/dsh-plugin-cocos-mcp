@@ -283,7 +283,12 @@ async function main() {
     //    实测会连带把「根节点不可删」的守卫测歪（拿旧场景的根名去测新场景）。
     //    残留场景还是引擎「上一个场景」记账的来源，也可能触发
     //    "Open the previous scene failed: xxx can not be found"。
-    const stale = await client.call('asset.query', { pattern: 'db://assets/scenes/__*.scene' });
+    //
+    // ⚠️⚠️ 通配符必须**收窄到本测试自己的前缀** ——
+    //    之前写的是 `__*.scene`，那会连**用户自己的** `__MyScene.scene` 一起删掉。
+    //    冒烟测试跑在用户真实注册的工程里 —— 误删用户资产是数据丢失。
+    //    本测试的场景名统一是 `__smoke_scene_<base36>`，只清这个前缀。
+    const stale = await client.call('asset.query', { pattern: 'db://assets/scenes/__smoke_scene_*.scene' });
     const staleList = (stale.data && stale.data.assets) || [];
     let staleDeleted = 0;
     for (const a of staleList) {
