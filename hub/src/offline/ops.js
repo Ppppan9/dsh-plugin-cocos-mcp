@@ -489,20 +489,33 @@ const HANDLERS = {
         const idx = findNodeIndex(ctx, op.node);
         const el = ctx.data[idx];
         const old = el._name;
-        el._name = String(op.name);
-        if (isStubNode(ctx, idx)) {
-            // stub 的真实名字在 override 里
+        // ⚠️ **必须先判断是不是 stub，再决定写哪里** ——
+        //    isStubNode 的判据是「`_name` 不是 string」（stub 节点的名字在 override 里），
+        //    所以**一旦先写了 `_name`，判断就必然失效** → stub 分支永远走不到。
+        //    之前就是先写后判，后果有三重：
+        //      1. 引擎读的是 override，改 `_name` 等于**零效果**（工具报成功、编辑器不变）；
+        //      2. stub 约定被破坏（stub 不该有 `_name`）；
+        //      3. 连锁污染 —— 重新加载后该节点不再被当作 stub，
+        //         后续 op 于是直接写进 stub 自己的组件 → 又是「报告成功但零效果」。
+        const isStub = isStubNode(ctx, idx);
+        if (isStub) {
+            // stub：**只**写 override，绝不写 `_name`。
             const inst = instanceForNode(ctx, idx);
-            if (inst) {
-                upsertOverride(ctx, inst, {
-                    localID: inst.fileId ? [inst.fileId] : [],
-                    propertyPath: ['_name'],
-                    value: String(op.name),
-                });
+            if (!inst) {
+                throw new Error(
+                    `节点 "${displayName(ctx, idx)}" 是嵌套 prefab 的 stub，但找不到它所属的 PrefabInstance —— 无法写入名字覆盖。`
+                );
             }
+            upsertOverride(ctx, inst, {
+                localID: inst.fileId ? [inst.fileId] : [],
+                propertyPath: ['_name'],
+                value: String(op.name),
+            });
+        } else {
+            el._name = String(op.name);
         }
         rebuildPaths(ctx);
-        return { node: displayName(ctx, idx), oldName: old, newName: String(op.name) };
+        return { node: displayName(ctx, idx), oldName: old, newName: String(op.name), stub: isStub };
     },
 
     'set-active': (ctx, op) => {

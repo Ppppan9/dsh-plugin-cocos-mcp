@@ -90,40 +90,66 @@ function serializeJson(data, format) {
 /**
  * 原子写：写临时文件 → rename 覆盖。
  * 失败时清理临时文件，绝不留下半个目标文件。
+ *
+ * ⚠️ **目标是符号链接时，写它的真实目标，而不是链接本身** ——
+ *    `rename` 覆盖的是**链接**（rename 会替换掉链接这个目录项），于是：
+ *      ① 软链被静默变成普通文件（链接结构被破坏）；
+ *      ② 软链指向的**真实文件一个字节都没变** —— 而工具报告成功。
+ *    「美术共享库用软链挂进项目」这种工作流会直接被写坏。
  */
 function atomicWrite(filePath, content) {
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  // ⚠️ 先清掉**陈旧**的临时文件 ——
-  //    进程如果正好在「写完临时文件、还没 rename」之间被杀，
-  //    就会在用户的 assets 目录里留下一个 .xxx.tmp-<pid>-<rand> 残file。
-  //    它是隐藏文件，Cocos 一般会忽略，但会污染用户的工程目录。
-  //    ⚠️ 只清**足够老**的（1 小时以上）—— 另一个进程可能正在用它写，
-  //    误删会把人家的写盘搞失败。
-  sweepStaleTmpFiles(dir, path.basename(filePath));
-
-  const tmp = path.join(
-    dir,
-    `.${path.basename(filePath)}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`
-  );
-  try {
-    fs.writeFileSync(tmp, content, 'utf8');
-  } catch (err) {
-    throw new Error(`写入临时文件失败（${tmp}）：${err.message}`);
-  }
-  try {
-    fs.renameSync(tmp, filePath);
-  } catch (err) {
-    try {
-      fs.unlinkSync(tmp);
-    } catch (_) {
-      /* ignore */
+    const target = resolveWriteTarget(filePath);
+    const dir = path.dirname(target);
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
     }
-    throw new Error(`原子写入失败（${filePath}）：${err.message}`);
-  }
-  return filePath;
+    // ⚠️ 先清掉**陈旧**的临时文件 ——
+    //    进程如果正好在「写完临时文件、还没 rename」之间被杀，
+    //    就会在用户的 assets 目录里留下一个 .xxx.tmp-<pid>-<rand> 残file。
+    //    它是隐藏文件，Cocos 一般会忽略，但会污染用户的工程目录。
+    //    ⚠️ 只清**足够老**的（1 小时以上）—— 另一个进程可能正在用它写，
+    //    误删会把人家的写盘搞失败。
+    sweepStaleTmpFiles(dir, path.basename(target));
+
+    const tmp = path.join(
+        dir,
+        `.${path.basename(target)}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`
+    );
+    try {
+        fs.writeFileSync(tmp, content, 'utf8');
+    } catch (err) {
+        throw new Error(`写入临时文件失败（${tmp}）：${err.message}`);
+    }
+    try {
+        fs.renameSync(tmp, target);
+    } catch (err) {
+        try {
+            fs.unlinkSync(tmp);
+        } catch (_) {
+            /* ignore */
+        }
+        throw new Error(`原子写入失败（${target}）：${err.message}`);
+    }
+    return target;
+}
+
+/**
+ * 真正要写的路径：**符号链接指向的真实文件**。
+ * 不是软链就原样返回。
+ */
+function resolveWriteTarget(filePath) {
+    try {
+        const st = fs.lstatSync(filePath);
+        if (!st.isSymbolicLink()) return filePath;
+    } catch (_) {
+        return filePath; // 文件还不存在
+    }
+    try {
+        return fs.realpathSync(filePath);
+    } catch (_) {
+        // 悬空软链（目标不存在）：写不了，返回原路径让上层报错
+        return filePath;
+    }
 }
 
 /** .meta 文件路径。 */

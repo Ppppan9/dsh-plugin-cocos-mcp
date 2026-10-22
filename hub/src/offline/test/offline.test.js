@@ -130,8 +130,69 @@ function makeRealAnim() {
     ];
 }
 
+/**
+ * **真实 Cocos Creator 3.8 的 .anim 结构**（照 Cocos 自带的 taxi/light.anim 还原）。
+ *
+ * ⚠️ 为什么单独造这个夹具：
+ *    仓库里原有的 makeRealAnim 是**简化过的虚构格式**
+ *    （clip.tracks / track 直接带 path / _channel 直接指向曲线），
+ *    旧解析器恰好能吃 → 于是**真实格式**从来没人测过，
+ *    结果真实 .anim 上「queryAnimation 找到 0 个通道、批量编辑第 2 个 op 必失败」。
+ *
+ * 真实结构的关键点（每一条都是踩过的坑）：
+ *   1. clip 用的是 **`_tracks`**（不是 tracks）
+ *   2. track 的属性路径藏在 **`_binding.path` → cc.animation.TrackPath → `_paths`**
+ *      （`_paths` 最后一项才是属性名，前面是层级路径）
+ *   3. track 的 **`_channel` / `_channels` 是引用**，指向 cc.animation.Channel 元素
+ *   4. Channel 的 **`_curve` 又是引用**，指向 cc.RealCurve / cc.QuatCurve
+ *   5. 曲线用 **`_times` + `_values` 两个平行数组**（不是 data 数组）
+ */
+function makeCocos38Anim() {
+  return [
+    {
+      __type__: 'cc.AnimationClip',
+      _name: '',
+      sample: 60,
+      speed: 1,
+      wrapMode: 1,
+      _duration: 2,
+      _tracks: [{ __id__: 1 }, { __id__: 6 }],
+      _events: [],
+    },
+    // ── QuatTrack：单数引用 _channel → Channel → _curve → QuatCurve
+    {
+      __type__: 'cc.animation.QuatTrack',
+      _binding: { __type__: 'cc.animation.TrackBinding', path: { __id__: 2 } },
+      _channel: { __id__: 4 },
+    },
+    { __type__: 'cc.animation.TrackPath', _paths: [{ __id__: 3 }, 'rotation'] },
+    { __type__: 'cc.animation.HierarchyPath', path: '/' },
+    { __type__: 'cc.animation.Channel', _curve: { __id__: 5 } },
+    {
+      __type__: 'cc.QuatCurve',
+      _times: [0, 1],
+      _values: [
+        { __type__: 'cc.QuatKeyframeValue', value: { __type__: 'cc.Quat', x: 0, y: 0, z: 0, w: 1 } },
+        { __type__: 'cc.QuatKeyframeValue', value: { __type__: 'cc.Quat', x: 0, y: 0, z: 0, w: 1 } },
+      ],
+    },
+    // ── VectorTrack：复数引用 _channels → 多个 Channel
+    {
+      __type__: 'cc.animation.VectorTrack',
+      _binding: { __type__: 'cc.animation.TrackBinding', path: { __id__: 7 } },
+      _channels: [{ __id__: 9 }, { __id__: 11 }],
+      _nComponents: 2,
+    },
+    { __type__: 'cc.animation.TrackPath', _paths: [{ __id__: 8 }, 'scale'] },
+    { __type__: 'cc.animation.HierarchyPath', path: '/' },
+    { __type__: 'cc.animation.Channel', _curve: { __id__: 10 } },
+    { __type__: 'cc.RealCurve', _times: [0, 1], _values: [{ __type__: 'cc.RealKeyframeValue', value: 1 }, { __type__: 'cc.RealKeyframeValue', value: 2 }] },
+    { __type__: 'cc.animation.Channel', _curve: { __id__: 12 } },
+    { __type__: 'cc.RealCurve', _times: [0, 1], _values: [{ __type__: 'cc.RealKeyframeValue', value: 3 }, { __type__: 'cc.RealKeyframeValue', value: 4 }] },
+  ];
+}
+
 function makeAnim() {
-    // Cocos 真实 .anim 形态：clip.tracks 指向 cc.CurveChannel 元素，
     // channel 元素自带 path 与 curve。
     return [
         {
@@ -903,4 +964,43 @@ test('★ ensureTargetOverride：localID 链不同时不复用（不能把 overr
     const before = data[prefabInfoIndex].targetOverrides.length;
     ensureTargetOverride(ctx, instance, ['INST', 'COMP']);
     assert.strictEqual(data[prefabInfoIndex].targetOverrides.length, before, '链相同应复用而不是新建');
+});
+
+// ───────────── 真实 Cocos 3.8 .anim 形态（之前从没被测过） ─────────────
+
+test('queryAnimation 能解析真实 Cocos 3.8 的 .anim（_tracks / _binding.path / 引用链）', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'real.anim');
+    writeJson(f, makeCocos38Anim());
+    const r = offline.queryAnimation({ filePath: f, selector: 'tree' });
+    assert.ok(r.ok, r.error);
+    const paths = (r.data.channels || []).map((c) => c.path);
+    assert.ok(paths.includes('rotation'), `应找到 rotation 通道，实际：${paths.join(',')}`);
+    assert.ok(paths.includes('scale'), `应找到 scale 通道，实际：${paths.join(',')}`);
+});
+
+test('真实 .anim 的批量编辑：2 个 op 都要成功，且值真的落进文件', () => {
+    // ⚠️ 之前真实 .anim 上「第 1 个 op 成功、第 2 个 op 必失败」
+    //    （两套解析器不一致，每执行完一个 op 就用坏的那套重扫）。
+    const dir = tmpdir();
+    const f = path.join(dir, 'real.anim');
+    writeJson(f, makeCocos38Anim());
+    const before = fs.readFileSync(f, 'utf8');
+
+    const r = offline.editAnimation({
+        filePath: f,
+        ops: [
+            { op: 'set-keyframe-value', path: 'rotation', time: 0, value: 0.5 },
+            { op: 'set-keyframe-value', path: 'scale', time: 0, value: 0.25 },
+        ],
+    });
+    assert.ok(r.ok, r.error);
+    assert.ok(r.data.changed > 0, `应有实际改动，changed=${r.data.changed}`);
+
+    const after = fs.readFileSync(f, 'utf8');
+    assert.notStrictEqual(after, before, '文件必须真的被改了');
+    const d = JSON.parse(after);
+    const real = d.find((e) => e.__type__ === 'cc.RealCurve');
+    assert.ok(real, '应还能找到 cc.RealCurve');
+    assert.strictEqual(real._values[0].value, 0.25, '关键帧的值必须真的写进文件（不是只改了副本）');
 });

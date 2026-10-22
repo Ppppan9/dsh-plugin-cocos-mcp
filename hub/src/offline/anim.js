@@ -12,7 +12,7 @@
  * op：offset-curve / set-keyframe-value / set-curve-channel
  */
 
-const { isPlainObject, deepClone, typeOf, refId } = require('./parse');
+const { isPlainObject, deepClone, typeOf, refId, loadAnimFromData, getKeyframes: parseGetKeyframes } = require('./parse');
 
 /* ------------------------------------------------------------- op schema */
 
@@ -73,72 +73,48 @@ function channelPath(channel) {
  * `VectorTrack._channels` 同理。之前不解引用 → 找不到关键帧 →
  * offset-curve 静默跳过 → 「报告成功但零改动」。
  */
+/**
+ * 取通道的关键帧数组。
+ *
+ * ⚠️ **直接用 parse.js 的实现** —— 之前 anim.js 和 parse.js 各有一份，
+ *    行为不一致（anim.js 那份不解引用 `_curve` 引用、也不认
+ *    真实 Cocos 的 `_times`/`_values` 布局），于是同一个通道
+ *    在 query 和 edit 里解析结果不同 → 「通道存在但解析不到关键帧」。
+ *    两套实现必须合并成一套。
+ */
 function getKeyframes(channel, data) {
-  if (!isPlainObject(channel)) return null;
-  // ⚠️ **先解引用，再在解引用后的元素上取容器**。
-  //   之前容器列表是用**未解引用**的 channel 算的（channel.curve / channel._curve / channel），
-  //   于是当 channel 本身是 {"__id__":N} 时，解引用后拿到的 CurveChannel 元素
-  //   它的 curve 子容器**永远不会被检查** → 引用型通道解析不到关键帧。
-  let el = channel;
-  if (typeof channel.__id__ === 'number' && Array.isArray(data)) {
-    el = data[channel.__id__];
-    if (!isPlainObject(el)) return null;
-  }
-  const containers = [el.curve, el._curve, el];
-  for (const c of containers) {
-    if (!isPlainObject(c)) continue;
-    for (const key of ['data', 'keyframes', '_data', '_keyframes', 'points']) {
-      if (Array.isArray(c[key])) return c[key];
-    }
-    // cc.Curve 的另一种布局：data 是对象，内含 paths / times+values
-    if (isPlainObject(c.data)) {
-      if (Array.isArray(c.data.paths)) return c.data.paths;
-      if (Array.isArray(c.data.times) && Array.isArray(c.data.values)) {
-        return c.data.times.map((t, i) => ({ time: t, value: c.data.values[i] }));
-      }
-    }
-  }
-  return null;
+  return parseGetKeyframes(channel, data);
 }
 
 /** 扫描 .anim 数据，返回 clip / tracks / channels。 */
+/**
+ * 扫描 anim 的轨道与通道。
+ *
+ * ⚠️ 这里**不再自己实现一套解析** —— 之前 anim.js 和 parse.js 各有一套，
+ *    行为不一致（anim.js 不解引用 `_channel`/`_channels`、不处理
+ *    `clip._tracks` 和 `_binding.path`），而 executeAnimOps 每执行完一个 op
+ *    就用这里的 scanAnim **重扫** → 于是**第 2 个 op 起状态就被污染**，
+ *    真实 Cocos .anim 的批量编辑全军覆没（还报成误导性的「通道不存在」）。
+ *    现在统一走 parse.js 的实现（唯一真相）。
+ */
 function scanAnim(data, filePath) {
-  if (!Array.isArray(data)) {
-    throw new Error(`anim 数据格式错误（${filePath}）：顶层必须是数组`);
-  }
-  let clipIndex = -1;
-  for (let i = 0; i < data.length; i++) {
-    if (typeOf(data[i]) === 'cc.AnimationClip') {
-      clipIndex = i;
-      break;
-    }
-  }
-  if (clipIndex < 0) {
-    throw new Error(`anim 中找不到 cc.AnimationClip（${filePath}）`);
-  }
-  const clip = data[clipIndex];
-  const tracks = [];
-  const rawTracks = Array.isArray(clip.tracks) ? clip.tracks : [];
-  rawTracks.forEach((t, n) => {
-    const ti = refId(t);
-    if (ti < 0) return;
-    const el = data[ti];
-    if (!isPlainObject(el)) return;
-    const channels = [];
-    if (Array.isArray(el._channels)) {
-      el._channels.forEach((c, ci) => {
-        if (!isPlainObject(c)) return;
-        channels.push({ index: ci, channel: c, path: channelPath(c), trackIndex: ti });
-      });
-    } else if (isPlainObject(el._channel)) {
-      channels.push({ index: 0, channel: el._channel, path: channelPath(el._channel), trackIndex: ti });
-    } else if (typeof el.path === 'string' || typeof el._path === 'string') {
-      // Cocos 真实 .anim 形态：track 元素本身就是 cc.CurveChannel
-      channels.push({ index: 0, channel: el, path: channelPath(el), trackIndex: ti });
-    }
-    tracks.push({ index: ti, element: el, trackNo: n, channels });
-  });
-  return { clipIndex, clip, tracks };
+  const parsed = loadAnimFromData(data, filePath);
+  return {
+    clipIndex: parsed.clipIndex,
+    clip: parsed.clip,
+    tracks: parsed.tracks.map((t) => ({
+      index: t.index,
+      element: t.element,
+      trackNo: t.trackNo,
+      channels: t.channels.map((c) => ({
+        index: c.index,
+        channel: c.channel,
+        ref: c.ref,
+        path: c.path,
+        trackIndex: t.index,
+      })),
+    })),
+  };
 }
 
 /** 收集全部通道。 */

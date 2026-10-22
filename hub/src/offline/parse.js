@@ -401,6 +401,21 @@ function loadPrefabForEdit(filePath) {
 function loadAnim(filePath) {
   const text = readTextFile(filePath);
   const data = parseJsonText(text, filePath);
+  const parsed = loadAnimFromData(data, filePath);
+  return {
+    filePath,
+    text,
+    format: detectFormat(text),
+    ...parsed,
+  };
+}
+
+/**
+ * 从**已解析的** anim 数组构造 clip / tracks / channels。
+ * ⚠️ 单独拆出来是为了让离线编辑器的两个模块共用同一份实现 ——
+ *    之前 parse.js 和 anim.js 各有一套，行为不一致（见 anim.js 的 scanAnim 注释）。
+ */
+function loadAnimFromData(data, filePath) {
   if (!Array.isArray(data)) {
     throw new Error(`anim 数据格式错误（${filePath}）：顶层必须是数组`);
   }
@@ -416,7 +431,13 @@ function loadAnim(filePath) {
   }
   const clip = data[clipIndex];
   const tracks = [];
-  const rawTracks = Array.isArray(clip.tracks) ? clip.tracks : [];
+  // ⚠️ 真实 Cocos 3.8 的 clip 用的是 **`_tracks`**（下划线），
+  //    `tracks` 是另一种写法。之前只认 `tracks` → 真实 .anim 解析出 **0 个轨道**。
+  const rawTracks = Array.isArray(clip._tracks)
+    ? clip._tracks
+    : Array.isArray(clip.tracks)
+      ? clip.tracks
+      : [];
   rawTracks.forEach((t, n) => {
     const ti = refId(t);
     if (ti < 0) return;
@@ -434,7 +455,7 @@ function loadAnim(filePath) {
           index: ci,
           channel: ch,
           ref: c,
-          path: channelPath(el) || (ch ? channelPath(ch) : ''),
+          path: trackPath(el, data) || (ch ? channelPath(ch) : ''),
           element: el,
         });
       });
@@ -445,26 +466,48 @@ function loadAnim(filePath) {
         index: 0,
         channel: ch,
         ref: el._channel,
-        path: channelPath(el) || (ch ? channelPath(ch) : ''),
+        path: trackPath(el, data) || (ch ? channelPath(ch) : ''),
         element: el,
       });
     } else if (typeof el.path === 'string' || typeof el._path === 'string') {
       // Cocos 真实 .anim 形态：track 元素本身就是 cc.CurveChannel
       // （带 path + curve），既没有 _channels 也没有 _channel。
-      channels.push({ index: 0, channel: el, path: channelPath(el), element: el });
+      channels.push({ index: 0, channel: el, path: trackPath(el, data) || channelPath(el), element: el });
     }
     tracks.push({ index: ti, element: el, trackNo: n, channels });
   });
 
   return {
-    filePath,
-    text,
-    format: detectFormat(text),
     data,
     clipIndex,
     clip,
     tracks,
   };
+}
+
+/**
+ * 取动画 **track** 的属性路径。
+ *
+ * ⚠️ 真实 Cocos 3.8 的路径**不在 track 上**：
+ *    track._binding.path → （引用）→ cc.animation.TrackPath 元素
+ *    → 它的 `_paths` 数组，最后一项是属性名（"rotation" / "scale" …），
+ *    前面几项是层级路径（引用形态的 cc.animation.HierarchyPath）。
+ *    之前只找 track 上的 path/_path/targetPath → 全都找不到 → 路径为空
+ *    → 「anim 通道不存在（path=""）」，而通道明明在。
+ */
+function trackPath(track, data) {
+  const direct = channelPath(track);
+  if (direct) return direct;
+  const binding = track && track._binding;
+  if (!isPlainObject(binding)) return '';
+  const bp = binding.path;
+  const tp = isPlainObject(bp) && typeof bp.__id__ === 'number' && Array.isArray(data) ? data[bp.__id__] : bp;
+  if (!isPlainObject(tp) || !Array.isArray(tp._paths)) return '';
+  for (let i = tp._paths.length - 1; i >= 0; i--) {
+    const seg = tp._paths[i];
+    if (typeof seg === 'string' && seg) return seg;
+  }
+  return '';
 }
 
 /** 取动画通道的路径（position / position.x / ...）。 */
@@ -477,13 +520,44 @@ function channelPath(channel) {
 }
 
 /** 取通道的关键帧数组（兼容 data / keyframes / _curve.data 等写法）。 */
-function getKeyframes(channel) {
+function getKeyframes(channel, data) {
   if (!isPlainObject(channel)) return null;
-  const containers = [channel.curve, channel._curve, channel];
+  // ⚠️ 容器本身也可能是**引用** —— 真实 Cocos 的 cc.animation.Channel._curve
+  //    就是 {"__id__": N}（曲线元素在数组另一处）。
+  const containers = [channel.curve, channel._curve, channel].map((c) => {
+    if (isPlainObject(c) && typeof c.__id__ === 'number' && Array.isArray(data)) {
+      const r = data[c.__id__];
+      return isPlainObject(r) ? r : c;
+    }
+    return c;
+  });
   for (const c of containers) {
     if (!isPlainObject(c)) continue;
     for (const key of ['data', 'keyframes', '_data', '_keyframes', 'points']) {
       if (Array.isArray(c[key])) return c[key];
+    }
+    // ⚠️ 真实 Cocos 的 cc.RealCurve / cc.QuatCurve 用的是**两个平行数组**：
+    //    `_times: [0,1,2]` + `_values: [{value: 1}, ...]`。
+    //    不处理这个布局 → 解析不到关键帧 → 「anim 通道 X 解析不到关键帧」。
+    //
+    // ⚠️ 关键：**返回的必须是「写回去能落到原数据上」的对象**。
+    //    之前直接映射成普通对象 {time, value} —— 写进去的值只改了副本，
+    //    磁盘上**一个字节都没变**，而工具报告「成功、changed:0」。
+    //    → 这里用 getter/setter 代理到 `_values[i]` 这个**真实**关键帧对象。
+    if (Array.isArray(c._times) && Array.isArray(c._values)) {
+      return c._times.map((t, i) => {
+        const raw = c._values[i];
+        return {
+          time: t,
+          get value() {
+            return raw && typeof raw === 'object' && 'value' in raw ? raw.value : raw;
+          },
+          set value(v) {
+            if (raw && typeof raw === 'object' && 'value' in raw) raw.value = v;
+            else if (raw !== undefined) c._values[i] = v;
+          },
+        };
+      });
     }
   }
   return null;
@@ -511,4 +585,6 @@ module.exports = {
   loadAnim,
   channelPath,
   getKeyframes,
+  loadAnimFromData,
+  trackPath,
 };
