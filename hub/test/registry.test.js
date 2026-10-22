@@ -126,3 +126,52 @@ test('dedupeShortNames：同项目多份注册 → 一个当代表，其余改�
     );
     assert.strictEqual(new Set(names).size, 2, '改名后不能重名');
 });
+
+// ────────────────────────────── 短名去重 ──────────────────────────────
+// ⚠️ 第二级去重（跨项目同名）此前**零覆盖**（第 10 轮复审实测：2 个变异全绿）。
+//    它是「多编辑器聚合」的命门 —— 两个项目撞短名时，
+//    工具名前缀就会串味（A 编辑器的工具被路由到 B 编辑器）。
+
+test('★ 跨项目同名时短名必须被改掉（不能撞车）', () => {
+    const { dedupeShortNames } = require('../src/registry');
+    const entries = [
+        { pid: 1, shortName: 'proj', projectPath: '/a/proj', ts: 1, url: 'http://127.0.0.1:1/', token: 'x'.repeat(20) },
+        { pid: 2, shortName: 'proj', projectPath: '/b/proj', ts: 2, url: 'http://127.0.0.1:2/', token: 'x'.repeat(20) },
+    ];
+    const out = dedupeShortNames(entries);
+    const names = out.map((e) => e.shortName);
+    assert.strictEqual(new Set(names).size, names.length, `★ 短名撞车了：${names.join(', ')}`);
+    // ⚠️ 同名的**两个都要改名**（不是「留一个、另一个加后缀」——
+    //    实现是「凡是与别人同名的，全部加上区分后缀」）。
+    assert.ok(names.every((n) => n !== 'proj'), `★ 同名的应全部改名，实际 ${names.join(', ')}`);
+    assert.ok(names.every((n) => n.startsWith('proj')), '★ 改出来的名字应保留原短名');
+});
+
+test('★ 同名改出来的短名要带上项目目录（可辨认）', () => {
+    const { dedupeShortNames } = require('../src/registry');
+    const entries = [
+        { pid: 1, shortName: 'proj', projectPath: '/a/proj', ts: 1, url: 'http://127.0.0.1:1/', token: 'x'.repeat(20) },
+        { pid: 2, shortName: 'proj', projectPath: '/b/proj', ts: 2, url: 'http://127.0.0.1:2/', token: 'x'.repeat(20) },
+    ];
+    const out = dedupeShortNames(entries);
+    const renamed = out.find((e) => e.shortName !== 'proj');
+    assert.ok(renamed, '应有一个被改名');
+    assert.match(renamed.shortName, /proj/, '★ 改出来的名字应保留原短名');
+    assert.match(renamed.shortName, /-|_/, `★ 改出来的名字应带区分后缀，实际 ${renamed.shortName}`);
+});
+
+test('★ 改出来的名字也不能再撞（候选名被占用时要继续加序号）', () => {
+    const { dedupeShortNames } = require('../src/registry');
+    // 三个项目、目录名都叫 proj → 候选名 "proj-proj" 会撞
+    const entries = [1, 2, 3].map((pid) => ({
+        pid,
+        shortName: 'proj',
+        projectPath: `/x${pid}/proj`,
+        ts: pid,
+        url: `http://127.0.0.1:${pid}/`,
+        token: 'x'.repeat(20),
+    }));
+    const out = dedupeShortNames(entries);
+    const names = out.map((e) => e.shortName);
+    assert.strictEqual(new Set(names).size, names.length, `★ 短名撞车了：${names.join(', ')}`);
+});

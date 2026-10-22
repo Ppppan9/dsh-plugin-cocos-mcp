@@ -50,6 +50,22 @@ module.exports = {
         <button @click="restart">重启 Bridge</button>
     </div>
 
+    <!-- ⚠️ 三个 IPC 各自分开失败，各说各的 ——
+         之前共用一个 try：拿不到客户端配置会把「Bridge 未运行」也显示出来，
+         用户会跑去重启 Bridge —— 而重启解决不了这个问题，纯误导。 -->
+    <div class="block" v-if="statusError">
+        <div class="block-title">状态读取失败</div>
+        <p class="hint error">{{ statusError }}</p>
+    </div>
+    <div class="block" v-if="configError">
+        <div class="block-title">客户端配置读取失败</div>
+        <p class="hint error">{{ configError }}</p>
+    </div>
+    <div class="block" v-if="channelsError">
+        <div class="block-title">消息清单读取失败</div>
+        <p class="hint error">{{ channelsError }}</p>
+    </div>
+
     <div class="block" v-if="hubInfo">
         <div class="block-title">Hub 位置</div>
         <div class="row"><label>路径</label><code class="path">{{ hubInfo.hub || '(未找到)' }}</code></div>
@@ -88,6 +104,7 @@ module.exports = {
 .row code { word-break: break-all; }
 .path { font-size: 11px; }
 .hint { opacity: .72; line-height: 1.6; margin: 6px 0; }
+.hint.error { opacity: 1; color: #e5534b; }
 pre.config { background: rgba(0,0,0,.28); padding: 8px; border-radius: 4px; font-size: 11px;
   white-space: pre-wrap; word-break: break-all; max-height: 180px; overflow: auto; }
 button { padding: 4px 12px; cursor: pointer; }
@@ -125,14 +142,31 @@ button { padding: 4px 12px; cursor: pointer; }
             }
         },
         async refresh() {
+            // ⚠️ 三个 IPC **各自分开 try** ——
+            //    之前共用一个 try：getStatus 成功后，getClientConfig / getChannels
+            //    任一失败就把 `this.status` 覆盖成 {running:false}，
+            //    面板于是把「拿不到客户端配置」显示成「**Bridge 没运行**」，
+            //    用户会跑去点「重启 Bridge」—— 重启也解决不了，纯粹误导。
             try {
                 this.status = await api.getStatus();
+            } catch (e) {
+                this.status = { running: false };
+                this.statusError = `读 Bridge 状态失败：${e && e.message ? e.message : e}`;
+            }
+            try {
                 this.clientConfig = await api.getClientConfig();
+            } catch (e) {
+                this.clientConfig = null;
+                this.configError = `读客户端配置失败：${e && e.message ? e.message : e}`;
+            }
+            try {
                 const channels = await api.getChannels();
                 this.channelCount = Object.keys(channels || {}).length;
                 this.messageCount = Object.values(channels || {}).reduce((a, b) => a + b.length, 0);
             } catch (e) {
-                this.status = { running: false };
+                this.channelCount = 0;
+                this.messageCount = 0;
+                this.channelsError = `读消息清单失败：${e && e.message ? e.message : e}`;
             }
             return this.status;
         },

@@ -535,6 +535,17 @@ function findComponentIndex(nodeDump, compType) {
 // 操作实现
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * `scene.script` 允许执行的方法（**唯一真相**）。
+ *
+ * ⚠️ 提到模块级并导出，是为了让「白名单」和「实现」用**同一份** ——
+ *    之前它是个函数体内的局部 const，一致性测试只能**扫源码**来核对，
+ *    而扫源码有各种绕法（换引号写法、换缩进、写成 METHODS['x']= …），
+ *    会出现「检查看着在守、实际漏掉了新方法」的情况（第 10 轮复审实测）。
+ *    ⇒ 改成模块级导出，测试直接 require 求值后做**结构比对**。
+ */
+const SCENE_SCRIPT_METHODS = ['getSceneSummary', 'findNodesByName', 'getNodeInfo', 'getWorldBounds', 'setNodeProperty', 'createNode'];
+
 function createHandlers(ctx) {
     /**
      * 必填参数校验。
@@ -762,7 +773,7 @@ function createHandlers(ctx) {
          */
         'scene.script': async (args) => {
             req(args, ['method'], 'scene.script');
-            const ALLOWED = ['getSceneSummary', 'findNodesByName', 'getNodeInfo', 'getWorldBounds', 'setNodeProperty', 'createNode'];
+            const ALLOWED = SCENE_SCRIPT_METHODS;
             if (!ALLOWED.includes(args.method)) {
                 throw new Error(`场景脚本方法 "${args.method}" 不在白名单内。可用：${ALLOWED.join('、')}`);
             }
@@ -1653,6 +1664,7 @@ module.exports = {
      * 导出给一致性测试直接求值 —— 不要让测试去正则解析源码。
      */
     sceneOpenBudgetMs,
+    SCENE_SCRIPT_METHODS,
     SCENE_OPEN_TIMEOUT_MS,
     SCENE_HEALTH_TIMEOUT_MS,
     SCENE_HEALTH_PROBE,

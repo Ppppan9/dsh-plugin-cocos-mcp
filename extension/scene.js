@@ -116,8 +116,13 @@ METHODS.setNodeProperty = function setNodeProperty(uuid, path, value) {
     const key = segments[segments.length - 1];
     // ⚠️ 这里用 `in`（不是 hasOwnProperty）是**有意的** ——
     //    Cocos 的节点属性（position / active / angle …）大多是**原型上的访问器**，
-    //    不是自有属性；换成 hasOwnProperty 会把正常用法全判成「属性不存在」。
-    //    原型链的风险由上面的「逐段拒绝保留名」挡住。
+    //    不是自有属性。
+    //    ⚠️ 注意理由不是「hasOwnProperty 会误判」（那不成立：守卫是 **AND**，
+    //    访问器当前有值时两种写法都放行 —— 第 10 轮复审实测纠正过我一次）；
+    //    真正的理由是：访问器**当前返回 undefined** 时它仍然是可写的属性，
+    //    这时 hasOwnProperty 会把它误判成「属性不存在」而拒掉。
+    //
+    //    原型链的风险不靠这里挡 —— 由上面的「逐段拒绝保留名」挡住。
     if (!(key in obj) && obj[key] === undefined) {
         throw new Error(`属性 "${key}" 不存在于 ${target.constructor.name}。可用键：${Object.keys(obj).slice(0, 40).join(', ')}`);
     }

@@ -98,9 +98,22 @@ test('★ 连接失败 / 超时要 reject（不能悬挂）', async () => {
     });
     try {
         const c2 = clientFor(srv.url);
-        await assert.rejects(
-            () => c2.invoke('bridge/invoke', {}, { timeoutMs: 800 }),
-            (e) => e instanceof BridgeError && e.code === 'TIMEOUT'
+        // ⚠️ **必须带兜底超时** ——
+        //    这条测的正是「超时机制本身」：万一实现里的超时被去掉，
+        //    没有兜底的 await 会**永远挂着** —— CI 不会立刻红，
+        //    而是挂到作业超时才红（实测能挂 45 秒以上）。
+        //    ⇒ 用 Promise.race 给一个上限，超了就明确报错。
+        const outcome = await Promise.race([
+            c2.invoke('bridge/invoke', {}, { timeoutMs: 800 }).then(
+                (v) => ({ ok: true, v }),
+                (e) => ({ ok: false, e })
+            ),
+            new Promise((r) => setTimeout(() => r({ ok: false, e: new Error('★ 悬挂了：超时机制没生效') }), 5000)),
+        ]);
+        assert.ok(!outcome.ok, '★ 不该成功返回');
+        assert.ok(
+            outcome.e instanceof BridgeError && outcome.e.code === 'TIMEOUT',
+            `应该是 TIMEOUT 的 BridgeError，实际 ${outcome.e && outcome.e.message}`
         );
     } finally {
         await srv.close();

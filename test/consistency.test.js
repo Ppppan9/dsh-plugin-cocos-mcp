@@ -59,7 +59,14 @@ test('每个编辑器工具都有对应的 Bridge 实现（op 或 handler）', (
 
 test('handlers.js 里每个 Bridge 操作都已被暴露成工具（或明确标注为内部）', () => {
     // 抓出 handlers.js 中定义的所有 op 名
-    const defined = [...handlersSrc.matchAll(/^\s{8}'([a-z][a-zA-Z0-9_.]*)':\s*async/gm)].map((m) => m[1]);
+    // ⚠️ 缩进**不能写死 8 个空格** —— 之前写死了，
+    //    换个缩进层级定义的新 op 就会被**整条漏掉**，
+    //    「每个 Bridge 操作都已被暴露成工具」这个保证就静默失效了
+    //    （第 10 轮复审实测过这种绕过）。
+    //    同时覆盖 async 箭头 / async function / 普通函数三种写法。
+    const defined = [
+        ...handlersSrc.matchAll(/^[ \t]+'([a-z][a-zA-Z0-9_.]*)':[ \t]*(async\b)?[ \t]*(function\b)?[ \t]*\(/gm),
+    ].map((m) => m[1]);
     const exposed = new Set(EDITOR_TOOLS.map((t) => t.op).filter(Boolean));
     // 工具用自定义 handler 调用的 op（形如 ctx.call('xxx')）也算已暴露
     for (const mm of editorToolsSrc.matchAll(/ctx\.call\(\s*'([a-z][a-zA-Z0-9_.]*)'/g)) {
@@ -171,18 +178,22 @@ test('离线模块的 op 形参统一叫 op（避免与 handlers.js 混用）', 
 // ────────────────────────────── 场景脚本白名单 ──────────────────────────────
 
 test('scene.script 的方法白名单与 scene.js 实际导出完全一致', () => {
-    const sceneSrc = read('extension/scene.js');
-    const exported = [...sceneSrc.matchAll(/^METHODS\.([a-zA-Z]+)\s*=/gm)].map((m) => m[1]);
-    assert.ok(exported.length >= 5, `scene.js 解析出的方法太少：${exported.length}`);
+    // ⚠️ 这里必须**结构比对**，不能扫源码 ——
+    //    扫源码有各种绕法（换引号写法、换缩进、写成 METHODS['x']= …），
+    //    第 10 轮复审实测过 5 种绕过 ⇒ 「检查看着在守、实际漏掉了新方法」。
+    //    现在两边都是 require 求值后拿到的**真实值**。
+    const { methods: sceneMethods } = require('../extension/scene');
+    const { SCENE_SCRIPT_METHODS } = require('../extension/bridge/handlers');
+    const exported = Object.keys(sceneMethods);
+    assert.ok(exported.length >= 5, `scene.js 导出的方法太少：${exported.length}`);
     // scene.js 必须以 exports.methods 的形式导出 —— Cocos 的 execute-scene-script
     // 按 exports.methods[method] 派发，直接 module.exports = METHODS 的话方法找不到
-    assert.ok(
-        /module\.exports\s*=\s*\{\s*methods:\s*METHODS\s*\}/.test(sceneSrc),
+    assert.strictEqual(
+        require('../extension/scene').methods,
+        sceneMethods,
         'scene.js 必须导出 { methods: METHODS }'
     );
-    const m = handlersSrc.match(/const ALLOWED = \[([^\]]+)\]/);
-    assert.ok(m, 'handlers.js 里找不到 scene.script 的 ALLOWED 白名单');
-    const allowed = m[1].split(',').map((x) => x.trim().replace(/'/g, '')).filter(Boolean);
+    const allowed = SCENE_SCRIPT_METHODS;
     const missing = allowed.filter((a) => !exported.includes(a));
     const extra = exported.filter((e) => !allowed.includes(e));
     assert.deepStrictEqual(missing, [], '白名单里有的方法 scene.js 并未导出：' + missing.join(', '));
@@ -327,12 +338,9 @@ test('scene.script 的 method 白名单：schema 与 Bridge 实现必须一致',
     //    与 bridge 侧的白名单（真正执行时拦）。
     //    两边一旦漂移，模型会收到「schema 说可以、实际被拒」或者反过来的错配。
     const schemaList = (EDITOR_TOOLS.find((t) => t.name === 'scene.script').inputSchema.properties.method.enum) || [];
-    const m = handlersSrc.match(/const ALLOWED = \[([^\]]+)\]/);
-    assert.ok(m, '解析不到 bridge 侧 scene.script 的 ALLOWED 白名单');
-    const bridgeList = m[1]
-        .split(',')
-        .map((s) => s.trim().replace(/^['"]|['"]$/g, ''))
-        .filter(Boolean);
+    // ⚠️ bridge 侧的名字**直接 require 求值**，不扫源码 ——
+    //    扫源码有绕法（换引号/换缩进），第 10 轮复审实测过。
+    const { SCENE_SCRIPT_METHODS: bridgeList } = require('../extension/bridge/handlers');
     assert.deepStrictEqual(
         [...schemaList].sort(),
         [...bridgeList].sort(),
@@ -545,7 +553,10 @@ test('★ 扩展端实际发出的每个消息都必须在 3.8.8 契约里', () 
     // ⚠️ 消息名要允许**数字**（`[a-z0-9-]+`）——
     //    只匹配字母的话，含数字的消息名会被**整条漏掉**，
     //    契约检查就成了「只查一部分」。
-    for (const re of [/send\(\s*'([a-z0-9-]+)'\s*,\s*'([a-z0-9-]+)'/g, /Editor\.Message\.request\(\s*'([a-z0-9-]+)'\s*,\s*'([a-z0-9-]+)'/g]) {
+    // ⚠️ 消息名要允许**下划线** —— 契约里现在没有带下划线的名字，
+    //    但正则不许下划线的话，将来加了一个带下划线的合法消息，
+    //    这条检查会**误报**（把合法消息说成「契约外」）。
+    for (const re of [/send\(\s*'([a-z0-9_-]+)'\s*,\s*'([a-z0-9_-]+)'/g, /Editor\.Message\.request\(\s*'([a-z0-9_-]+)'\s*,\s*'([a-z0-9_-]+)'/g]) {
         let m;
         while ((m = re.exec(src))) used.set(`${m[1]}:${m[2]}`, (used.get(`${m[1]}:${m[2]}`) || 0) + 1);
     }
@@ -566,7 +577,7 @@ test('★ 扩展端实际发出的每个消息都必须在 3.8.8 契约里', () 
         // ⚠️ 必须**两个参数都是字面量**才算「已扫到」——
         //    只看第一个参数会漏掉「频道是字面量、消息名是变量」这种
         //    （那正是最容易在重构时被写出来的形状）。
-        if (/^\s*'[^']*'\s*,\s*'[^']*'/.test(tail)) continue;
+        if (/^\s*'[^']*'\s*,\s*'[^']*'/.test(tail)) continue;  // 两个都是字面量
         if (/^\s*\)/.test(tail)) continue;        // 无参调用（不可能，但别误报）
         if (/^\s*channel\s*,\s*message/.test(tail)) continue;  // 函数定义本身
         if (/^\s*args\.channel\s*,\s*args\.message/.test(tail)) {
