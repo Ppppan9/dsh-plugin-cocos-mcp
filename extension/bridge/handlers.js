@@ -570,6 +570,11 @@ const ASSET_PATH_FIELDS = {
     'asset.delete': ['url'],
     'asset.move': ['from', 'to'],
     'asset.copy': ['from', 'to'],
+    // ⚠️ 这两个**也会让引擎去读那个路径**（重新导入 / 刷新），
+    //    所以它们跟「写文件」是同一风险等级 —— 不能因为「扩展端只是转手」
+    //    就放过（第 11 轮复审 G-9 指出的口径不自洽）。
+    'asset.reimport': ['url'],
+    'asset.refresh': ['url'],
 };
 
 /**
@@ -581,18 +586,20 @@ const ASSET_PATH_FIELDS = {
  *    要么进这张表并写明为什么不需要。
  *    两张表都没有 ⇒ 一致性测试报错（不会「默默地漏掉」）。
  *
- * ⚠️ 判断依据是**扩展端会不会拿它去碰文件系统**：
- *    只当「资源库里的 key」传给引擎的，不需要护栏；
- *    会拼成文件路径去读/写的，必须护栏。
+ * ⚠️ **判据**（第 11 轮复审 G-9 修正过一次口径）：
+ *    「这个 url 会不会让**引擎去读/写那个路径**」——
+ *    · 会（写文件、重新导入、刷新）⇒ 必须护栏；
+ *    · 不会（只当资源库里的 **key** 查）⇒ 可以豁免。
+ *    之前写的是「扩展端碰不碰文件系统」—— 那在写侧自洽，
+ *    但在读侧把 `asset.info`（只查 key）和 `asset.reimport`（会让引擎去导入那个路径）
+ *    归成了一类 ⇒ 口径不自洽。现在按上面这条判。
  */
 const NOT_ASSET_PATH_FIELDS = {
-    'asset.info.url': '只作为资源库里的 key 查元信息，扩展端不碰文件系统',
+    'asset.info.url': '只作为资源库里的 key 查元信息，引擎不会去读那个路径',
     'asset.uuid.url': '只作为 key 把路径换成 uuid',
     'asset.path.url': '只作为 key 查库里记录的路径字段',
     'asset.dependencies.url': '只作为 key 查依赖',
     'asset.users.url': '只作为 key 查引用者',
-    'asset.reimport.url': '只触发引擎按 key 重新导入，不会创建/写入文件',
-    'asset.refresh.url': '只触发引擎按 key 刷新，不会创建/写入文件',
     'asset.query.pattern': '查询通配符（glob），不是路径 —— 传给引擎的 asset-db:query-assets',
     // ⚠️ 这两个是**有意指向项目外**的：参考图就是外部素材，
     //    业务上必须能引用磁盘上任意位置的图片。

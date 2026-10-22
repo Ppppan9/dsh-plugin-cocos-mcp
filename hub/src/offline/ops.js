@@ -1102,9 +1102,11 @@ const OP_PATH_FIELDS = [
  *    ⇒ 新增一个带 `prefab` / `asset` 这类字段的 op 时，
  *      **必须显式表态**，不会「默默地漏掉」。
  *
- * 判定用的正则见 test/op-path-fields.test.js
- * （`/path|file|url|dir|prefab|asset|folder|uri/i`）。
- * `name` / `target` 不在正则里 —— 它们通常是**节点名或组件名**，不是路径。
+ * 判定用的口径见 `hub/src/util/path-fields.js`（**全仓库唯一一份**，
+ * 离线层与扩展端都 require 它 —— 两份口径一定会漂移，
+ * 而漂移的后果是「护栏对某类字段静默不存在，而 CI 全绿」，
+ * 第 11 轮复审 H-1 实测过这个形态）。
+ * `name` / `target` 不在口径里 —— 它们通常是**节点名或组件名**，不是路径。
  */
 const NOT_PATH_FIELDS = {
     'rename-node.name': '节点名，不是路径',
