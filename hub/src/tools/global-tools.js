@@ -19,6 +19,48 @@ const { realpathBestEffort, isInsideAnyRoot } = require('../util/path-guard');
 const KNOWLEDGE = require('../knowledge/cocos-knowledge.json');
 const EDITOR_MESSAGES = require('../knowledge/editor-messages.json');
 
+/**
+ * `cocos_knowledge` 的**全部**合法 topic（唯一真相）。
+ *
+ * ⚠️ 为什么要单列一份：enum 与 index 返回的 topic 列表**必须一致** ——
+ *    之前 index 直接 `Object.keys(KNOWLEDGE)`，把知识库 JSON 里的 `version`
+ *    也列了出来，而 enum 不接受它 ⇒ 模型照着 index 调 `topic=version` 就被拒
+ *    （「声明 ≠ 能用」，第 11 轮复审 G-4）。
+ */
+const KNOWLEDGE_TOPICS = ['components', 'coordinates', 'layout', 'workflow', 'traps', 'messages', 'all', 'index'];
+
+/**
+ * index 返回的 topic 列表 = **真正查得到内容**的那些。
+ * ⚠️ 用「enum ∩ 知识库实际有的键」算出来，而不是手写 ——
+ *    手写就会和 enum / 知识库内容**三处漂移**。
+ *    （`version` 是知识库 JSON 里的元信息键，不是可查询主题 → 自动被排除。）
+ */
+const KNOWLEDGE_INDEX_TOPICS = KNOWLEDGE_TOPICS.filter(
+    (t) => t === 'messages' || t === 'all' || t === 'index' || Object.prototype.hasOwnProperty.call(KNOWLEDGE, t)
+);
+
+/**
+ * 按名字找组件，支持 `cc.Label` / `Label` / `label` 三种写法。
+ *
+ * ⚠️ 之前只做**全名**匹配（`k.toLowerCase() === component.toLowerCase()`），
+ *    于是 `component: 'Label'` 匹配不到 `cc.label` ⇒ 走进「查不到」分支
+ *    （第 11 轮复审 G-5）。
+ *
+ * @param {string} name 用户给的组件名
+ * @returns {string|null} 知识库里的真实键名（如 `cc.label`）
+ */
+function findComponentKey(name) {
+    const wanted = String(name).trim().toLowerCase();
+    if (!wanted) return null;
+    const keys = Object.keys(KNOWLEDGE.components);
+    return (
+        keys.find((k) => k.toLowerCase() === wanted) ||
+        keys.find((k) => k.toLowerCase() === `cc.${wanted}`) ||
+        keys.find((k) => k.toLowerCase().endsWith(`.${wanted}`)) ||
+        null
+    );
+}
+
 const { T } = require('./schema');
 
 // ─────────────────────────────────────────────────────────────
@@ -160,7 +202,7 @@ const GLOBAL_TOOLS = [
             properties: {
                 topic: {
                     type: 'string',
-                    enum: ['components', 'coordinates', 'layout', 'workflow', 'traps', 'messages', 'all', 'index'],
+                    enum: KNOWLEDGE_TOPICS,
                     description: '要查询的知识主题',
                 },
                 component: { type: 'string', description: 'topic=components 时可指定具体组件，如 cc.Label' },
@@ -169,8 +211,13 @@ const GLOBAL_TOOLS = [
         handler: async (args) => {
             const topic = args.topic || 'index';
             if (topic === 'index') {
+                // ⚠️ **只能列真正查得到的 topic** ——
+                //    之前这里直接 `Object.keys(KNOWLEDGE)`，把知识库 JSON 里的
+                //    `version` 也列了出来，而 enum 不接受它 ⇒
+                //    模型先调 index 看到 "version"，再调 topic=version 就被拒
+                //    （「声明 ≠ 能用」，第 11 轮复审 G-4）。
                 return {
-                    topics: Object.keys(KNOWLEDGE).concat(['messages']),
+                    topics: KNOWLEDGE_INDEX_TOPICS,
                     hint: '传 topic 参数查询具体主题；components 主题还可传 component 参数精确到单个组件。',
                 };
             }
@@ -182,12 +229,15 @@ const GLOBAL_TOOLS = [
             }
             if (topic === 'components') {
                 if (args.component) {
-                    const key = Object.keys(KNOWLEDGE.components).find((k) => k.toLowerCase() === String(args.component).toLowerCase());
+                    const key = findComponentKey(args.component);
                     if (!key) {
-                        return {
-                            available: Object.keys(KNOWLEDGE.components),
-                            error: `没有组件 "${args.component}" 的属性表。`,
-                        };
+                        // ⚠️ **必须抛错，不能「成功 + 一个 error 字段」** ——
+                        //    后者会让 MCP 层标 isError=false，
+                        //    脚本只判 isError 就把失败当成功（本项目最忌讳的「假成功」）。
+                        throw new Error(
+                            `没有组件 "${args.component}" 的属性表。` +
+                            `可用：${Object.keys(KNOWLEDGE.components).join('、')}`
+                        );
                     }
                     return { component: key, ...KNOWLEDGE.components[key] };
                 }

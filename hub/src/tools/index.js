@@ -158,7 +158,24 @@ class ToolRegistry {
         this.editorTools = EDITOR_TOOLS;
         this.globalTools = GLOBAL_TOOLS;
         this._byName = new Map();
+        this._filterMiss = false;
+        this._filterMissDetail = '';
         this._rebuild();
+    }
+
+    /**
+     * 「过滤器没命中」的说明（没有就是空串）。
+     *
+     * ⚠️ 这段以前**写了从不读**（`_filterMiss` 置了 true 却没人看），
+     *    于是 `COCOS_MCP_EDITOR_FILTER` 写错时 hub 会静默连上**全部**实例，
+     *    用户完全看不出来（第 11 轮复审 G-6）。
+     *    ⇒ 现在它有明确的出口：启动时打一条 stderr 警告，
+     *      并且并进 MCP 的 instructions（让模型也知道「过滤没生效」）。
+     *
+     * @returns {string}
+     */
+    filterMissNotice() {
+        return this._filterMiss ? this._filterMissDetail : '';
     }
 
     /**
@@ -167,7 +184,13 @@ class ToolRegistry {
      * 几十次调用就白烧掉几十次重建（每次还要算 dedupeShortNames）。
      */
     _rebuild(force = false) {
-        const editors = this.listEditors() || [];
+        // ⚠️ 必须是 `let` —— 下面过滤器命中时要做 `editors = hit`。
+        //    之前写成 `const`，于是**过滤器一旦命中就抛**
+        //    「Assignment to constant variable」⇒
+        //    设了 `COCOS_MCP_EDITOR_FILTER` 且短名写对时，hub 直接起不来
+        //    （写错反而「能用」—— 退回全部实例那条路不赋值）。
+        //    ⚠️ 这条路径**没有任何测试覆盖**，是写 G-6 的回归用例时撞出来的。
+        let editors = this.listEditors() || [];
         // ⚠️ 签名必须包含 url、token **和 stale**：
         //   - url/token：扩展的「重启 Bridge」会**重新生成 token 并换端口**，
         //     但 pid 与 shortName 不变。签名里少了它们，_rebuild 会认为「没变化」
@@ -188,11 +211,19 @@ class ToolRegistry {
         if (this.filter) {
             const hit = editors.filter((e) => e.shortName === this.filter);
             if (!hit.length) {
-                // 过滤的实例不在了就退回全部，避免整个服务不可用（并记下来，提示里能说明）
+                // 过滤的实例不在了就退回全部，避免整个服务不可用。
+                // ⚠️ 但**必须说出来**（第 11 轮复审 G-6）：
+                //    之前这里只置了一个 `_filterMiss = true`，
+                //    而全仓库**没有任何一处读它** ⇒
+                //    `COCOS_MCP_EDITOR_FILTER=xxx` 写错时，hub 会静默连上**全部**编辑器实例，
+                //    用户完全看不出自己的过滤没生效 ——
+                //    而「调错实例」正是多编辑器场景下最高发的那类错误。
                 this._filterMiss = true;
+                this._filterMissDetail = `没有找到短名为 "${this.filter}" 的编辑器实例，已退回使用全部实例。`;
             } else {
                 editors = hit;
                 this._filterMiss = false;
+                this._filterMissDetail = '';
             }
         }
         const multi = editors.length > 1;

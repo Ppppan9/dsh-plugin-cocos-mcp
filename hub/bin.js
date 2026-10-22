@@ -117,7 +117,14 @@ async function main() {
     const server = new McpServer({
         serverInfo: SERVER_INFO,
         providers: {
-            instructions: () => INSTRUCTIONS,
+            // ⚠️ 「过滤器没命中」必须**说出来**（第 11 轮复审 G-6）：
+            //    `COCOS_MCP_EDITOR_FILTER` 写错时，hub 会退回连**全部**实例，
+            //    而这件事以前只写在一个**从不被读**的字段里 ⇒ 用户完全看不出来。
+            //    ⇒ 一条 stderr 警告（给人看）+ 并进 instructions（给模型看）。
+            instructions: () => {
+                const notice = tools.filterMissNotice();
+                return notice ? `${INSTRUCTIONS}\n\n⚠️ ${notice}` : INSTRUCTIONS;
+            },
             tools: async () => tools.list(),
             callTool: async (name, toolArgs) => {
                 const data = await tools.call(name, toolArgs);
@@ -145,6 +152,16 @@ async function main() {
             server.notifyResourceListChanged();
         }
     });
+
+    // ⚠️ 「过滤器没命中」要在 stderr 上**说一次**（给人看）。
+    //    写在 stderr 而不是只进 instructions，是因为 instructions 只有模型看得见 ——
+    //    而「我明明指定了只连某一个编辑器，它却连上了全部」是**用户**要立刻知道的事。
+    {
+        const notice = tools.filterMissNotice();
+        if (notice) {
+            process.stderr.write(`[cocos-mcp] ⚠️ ${notice}\n`);
+        }
+    }
 
     // 定期淘汰失效的 client（扩展重启 Bridge 后旧 entry 不会消失）
     const evictTimer = setInterval(() => getClient.evictStale && getClient.evictStale(), 30000);

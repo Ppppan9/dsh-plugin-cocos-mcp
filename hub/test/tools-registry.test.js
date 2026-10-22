@@ -120,3 +120,53 @@ test('waitMs=0 应当被如实尊重（不等，立即返回当前状态）', as
     assert.ok(Date.now() - t0 < 3000, 'waitMs=0 应该立即返回，不该等 90 秒');
     assert.strictEqual(r.imported, false, '没等到导入完成就该如实返回 false');
 });
+
+test('★ 过滤器没命中时必须**说出来**（不能静默连上全部实例）', () => {
+    // ⚠️ 第 11 轮复审 G-6：
+    //    `COCOS_MCP_EDITOR_FILTER` 写错时，registry 会退回连**全部**实例 ——
+    //    这件事以前只写在一个**从不被读**的字段（`_filterMiss`）里，
+    //    于是用户完全看不出自己的过滤没生效，
+    //    而「调错实例」正是多编辑器场景下最高发的那类错误。
+    const editors = [
+        { shortName: 'alpha', pid: 1, url: 'http://127.0.0.1:7523/bridge', token: 't'.repeat(32) },
+        { shortName: 'beta', pid: 2, url: 'http://127.0.0.1:7524/bridge', token: 't'.repeat(32) },
+    ];
+    const old = process.env.COCOS_MCP_EDITOR_FILTER;
+    try {
+        process.env.COCOS_MCP_EDITOR_FILTER = '写错的短名';
+        const reg = new ToolRegistry({
+            getClient: () => ({ invoke: async () => ({ ok: true }) }),
+            listEditors: () => editors,
+        });
+        const notice = reg.filterMissNotice();
+        assert.ok(notice, '★ 过滤器没命中必须给出提示（不能静默）');
+        assert.match(notice, /写错的短名/, '★ 提示要说清是哪个短名没找到');
+
+        // 过滤器命中时不该有提示
+        process.env.COCOS_MCP_EDITOR_FILTER = 'alpha';
+        const reg2 = new ToolRegistry({
+            getClient: () => ({ invoke: async () => ({ ok: true }) }),
+            listEditors: () => editors,
+        });
+        assert.strictEqual(reg2.filterMissNotice(), '', '★ 过滤器命中时不该有提示');
+
+        // ⚠️ **过滤器命中这条路本身以前是坏的** ——
+        //    `_rebuild` 里 `editors = hit` 撞上 `const editors` ⇒ TypeError ⇒
+        //    设了正确的 `COCOS_MCP_EDITOR_FILTER` 反而**起不来**。
+        //    （从第一个提交起就是这样，只是**从来没有测试覆盖过这条路径**。）
+        //    ⇒ 断言「过滤真的生效」：只该有 alpha 的工具。
+        //    ⚠️ 命中后只剩 1 个实例 ⇒ 工具**不加前缀**（多编辑器时才加），
+        //    所以正确的断言是「工具路由到了 alpha」。
+        const entry = reg2._byName.get('scene.tree');
+        assert.ok(entry, '★ 应当有 scene.tree');
+        assert.ok(entry.editor, '★ scene.tree 必须绑定了编辑器实例');
+        assert.strictEqual(
+            entry.editor.shortName,
+            'alpha',
+            '★ 过滤器命中后，工具必须只路由到命中的那个实例'
+        );
+    } finally {
+        if (old === undefined) delete process.env.COCOS_MCP_EDITOR_FILTER;
+        else process.env.COCOS_MCP_EDITOR_FILTER = old;
+    }
+});
