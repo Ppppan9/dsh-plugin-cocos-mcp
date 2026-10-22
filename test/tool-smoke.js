@@ -737,6 +737,7 @@ if (process.argv.some((a) => a.startsWith('--selftest-exit='))) {
 main().catch((e) => {
     console.error('冒烟测试中断：', e);
     if (client) client.close();
-    // ⚠️ 用 3 而不是 2 —— 2 已经表示「有跳过、本轮没跑完」了
+    // ⚠️ 用 EXIT.CRASH（4）—— 2 已经表示「有跳过、本轮没跑完」了，
+    //    同一个码在不同脚本里表示两件事，CI 就读不出来。
     process.exit(EXIT.CRASH);
 });
