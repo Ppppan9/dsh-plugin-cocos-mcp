@@ -19,6 +19,8 @@ const os = require('os');
 
 const HUB = path.join(__dirname, '..', 'hub', 'bin.js');
 const { exitCodeFor } = require('./smoke-exit');
+const { poisonReason } = require('./smoke-poison');
+const { EXIT } = require('./exit-codes');
 const { cleanupVerdict } = require('./smoke-cleanup');
 const AS_JSON = process.argv.includes('--json');
 const WITH_BUILD = process.argv.includes('--with-build');
@@ -132,25 +134,9 @@ function log(...a) { if (!AS_JSON) console.log(...a); }
  *    它自己的文案就写着「稍后重试即可」——
  *    把它报成「引擎缺陷」是**报告不准**：人看到「引擎缺陷」就不会再查了。
  */
-const POISON_PATTERNS = [
-    {
-        re: /场景频道\*\*暂时无响应\*\*/,
-        reason: '暂态：scene 频道暂时无响应（编辑器正忙，如启动时自动刷新），本轮未跑完',
-    },
-    {
-        re: /场景频道已经卡死/,
-        reason: '引擎缺陷：scene 频道已卡死（调研报告 6.14），本轮未跑完',
-    },
-];
-
-/** 命中哪个特征 → 返回它的理由；一个都不命中 → null（是真失败）。 */
-function poisonReason(text) {
-    const s = String(text || '');
-    for (const p of POISON_PATTERNS) {
-        if (p.re.test(s)) return p.reason;
-    }
-    return null;
-}
+// ⚠️ 判据来自**共享模块** test/smoke-poison.js ——
+//    冒烟与真机前置守卫必须用同一套，否则两边会自相矛盾
+//    （一边说「环境没问题」、另一边说「整个频道都废了」）。
 
 /**
  * 记录一条断言（不走 check()，因为它检查的是**已有响应**而不是再调一次工具）。
@@ -202,8 +188,9 @@ async function check(name, args, opts = {}) {
     //    把它们算作「失败」，等于把「一个根因」变成「几十个症状」——
     //    既看不清问题，也会让冒烟测试的红绿失去意义（真正的回归会被淹没）。
     //    这里只认精确特征，所以真正的回归仍然是失败。
-    const reason = rejected ? poisonReason(r.text) : null;
-    if (reason) {
+    const hit = rejected ? poisonReason(r.text) : null;
+    if (hit) {
+        const reason = hit.reason;
         results.push({ name, status: 'skip', ms, detail: firstLine(r.text), reason });
         log(`  ⏭ ${name.padEnd(22)} ${String(ms).padStart(6)}ms  跳过：${reason}`);
         return r;
@@ -249,7 +236,7 @@ async function main() {
             `检测到多个编辑器实例（${client.prefixed.size} 个带前缀的工具族），` +
             '请用环境变量 COCOS_MCP_EDITOR_FILTER=<短名> 指定一个后重跑。'
         );
-        process.exit(2);
+        process.exit(EXIT.INCOMPLETE);
     }
 
     // ── 0. 工具面自检（静态）──────────────────────────────
@@ -628,6 +615,28 @@ async function main() {
         byTool.get(r.name).push(r);
     }
 
+    finish(results, declared, byTool, skipped, leftovers, failed, () => client.close());
+}
+
+/**
+ * 汇总 + 决定退出码。
+ *
+ * ⚠️ 抽成独立函数是为了让**退出码的接线**也能被执行验证 ——
+ *    只测 `exitCodeFor` 这个纯函数是不够的：
+ *    把本文件里的 `process.exit(...)` 改回旧写法，纯函数测试照样全绿，
+ *    而「频道中毒 → 退出 0 → CI 判绿」那个 bug 就悄悄回来了。
+ *    抽出来之后，`--selftest-exit=f,s,l` 走的是**完全相同**的这条路径，
+ *    测试直接 spawn 本脚本看退出码 —— 接线断了就会红。
+ *
+ * @param {Array} results 每条断言记录
+ * @param {Array} declared 工具清单（用于「未覆盖的工具」）
+ * @param {Map} byTool 工具名 → 记录列表
+ * @param {Array} skipped 跳过项
+ * @param {Array} leftovers 残留项
+ * @param {Array} failed 失败项
+ * @param {Function|null} cleanup 退出前的清理（关掉客户端）
+ */
+function finish(results, declared, byTool, skipped, leftovers, failed, cleanup) {
     console.log('\n' + '='.repeat(74));
     console.log(`总调用 ${results.length} 次，覆盖 ${byTool.size} 个工具`);
     console.log(
@@ -679,7 +688,7 @@ async function main() {
     }
 
     if (AS_JSON) process.stdout.write(JSON.stringify({ results, notCovered }, null, 2) + '\n');
-    client.close();
+    if (cleanup) cleanup();
     // ⚠️ 退出码要能区分**三件事** ——
     //   0 = 全部通过
     //   1 = 有真失败（真回归）
@@ -692,9 +701,42 @@ async function main() {
     process.exit(exitCodeFor(failed.length, skipped.length, leftovers.length));
 }
 
+/**
+ * ★ 自测模式：只走**汇总 + 退出码**这条路径，不连编辑器。
+ *
+ *   node test/tool-smoke.js --selftest-exit=<失败数>,<跳过数>,<残留数>
+ *
+ * 为什么需要它：只测 `exitCodeFor` 这个纯函数**不够** ——
+ * 把本文件里的 `process.exit(...)` 改回旧写法，纯函数测试照样全绿，
+ * 而 H1 那个 bug（频道中毒 → 退出 0 → CI 判绿）就悄悄回来了。
+ * 第 7 轮独立复审实测过这个缺口：改掉接线后 178 条用例**一片绿**。
+ *
+ * ⇒ 测试直接 spawn 本脚本看退出码 —— **接线断了就会红**。
+ */
+if (process.argv.some((a) => a.startsWith('--selftest-exit='))) {
+    const arg = process.argv.find((a) => a.startsWith('--selftest-exit='));
+    const [nf, nsk, nlf] = arg.split('=')[1].split(',').map((x) => Number(x) || 0);
+    const fake = [];
+    for (let k = 0; k < nf; k++) fake.push({ name: 'selftest.fail' + k, status: 'fail', ms: 0, detail: '自测' });
+    for (let k = 0; k < nsk; k++) {
+        fake.push({ name: 'selftest.skip' + k, status: 'skip', ms: 0, detail: '自测', reason: '自测用' });
+    }
+    for (let k = 0; k < nlf; k++) fake.push({ name: 'selftest.left' + k, status: 'leftover', ms: 0, detail: '自测' });
+    const byToolFake = new Map();
+    for (const r of fake) {
+        if (!byToolFake.has(r.name)) byToolFake.set(r.name, []);
+        byToolFake.get(r.name).push(r);
+    }
+    const sk = fake.filter((r) => r.status === 'skip');
+    const lf = fake.filter((r) => r.status === 'leftover');
+    const fl = fake.filter((r) => r.status !== 'ok' && r.status !== 'skip' && r.status !== 'leftover');
+    finish(fake, [], byToolFake, sk, lf, fl, null);
+}
+
+
 main().catch((e) => {
     console.error('冒烟测试中断：', e);
     if (client) client.close();
     // ⚠️ 用 3 而不是 2 —— 2 已经表示「有跳过、本轮没跑完」了
-    process.exit(3);
+    process.exit(EXIT.CRASH);
 });

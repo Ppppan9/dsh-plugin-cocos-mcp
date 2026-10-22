@@ -24,6 +24,7 @@ const os = require('os');
 
 const HUB = path.join(__dirname, '..', 'hub', 'bin.js');
 const { requireSceneChannel } = require('./editor-health');
+const { EXIT } = require('./exit-codes');
 const KEEP_SCENE = process.argv.includes('--keep-scene');
 
 let pass = 0;
@@ -187,12 +188,12 @@ async function main() {
         probeJson = JSON.parse(probeOut);
     } catch (_) {
         console.error('无法解析 --probe 输出：\n' + probeOut);
-        process.exit(2);
+        process.exit(EXIT.INCOMPLETE);
     }
     if (!probeJson.ok) {
         console.error('❌ 没有可用的 Cocos Creator 实例。请先打开项目并启用 cocos-mcp 扩展。');
         console.error(JSON.stringify(probeJson, null, 2));
-        process.exit(2);
+        process.exit(EXIT.INCOMPLETE);
     }
     const editor = probeJson.editors.find((e) => e.ok);
     ok('发现并连接 Cocos Creator', `${editor.shortName} / ${editor.editorVersion} / ${editor.ops} 个操作`);
@@ -500,7 +501,7 @@ async function main() {
         for (const f of failures) console.log('   - ' + f);
     }
     console.log('');
-    process.exit(fail === 0 ? 0 : 1);
+    process.exit(fail === 0 ? EXIT.OK : EXIT.FAILURE);
 }
 
 main();

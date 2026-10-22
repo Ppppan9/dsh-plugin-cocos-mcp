@@ -13,6 +13,7 @@
 
 const { spawn } = require('child_process');
 const { requireSceneChannel } = require('./editor-health');
+const { EXIT } = require('./exit-codes');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -154,8 +155,8 @@ async function main() {
     probe.stdout.on('data', (d) => (probeOut += d));
     await new Promise((r) => probe.on('close', r));
     let pj;
-    try { pj = JSON.parse(probeOut); } catch (_) { console.error('probe 输出异常'); process.exit(2); }
-    if (!pj.ok) { console.error('没有可用的 Cocos 实例，先启动编辑器'); process.exit(2); }
+    try { pj = JSON.parse(probeOut); } catch (_) { console.error('probe 输出异常'); process.exit(EXIT.INCOMPLETE); }
+    if (!pj.ok) { console.error('没有可用的 Cocos 实例，先启动编辑器'); process.exit(EXIT.INCOMPLETE); }
     const ed = pj.editors.find((e) => e.ok);
     console.log(`  编辑器：${ed.shortName} / ${ed.editorVersion}\n`);
 
@@ -170,7 +171,7 @@ async function main() {
             `检测到多个编辑器实例（${c.prefixed.size} 个带前缀的工具族），` +
             '请用环境变量 COCOS_MCP_EDITOR_FILTER=<短名> 指定一个后重跑。'
         );
-        process.exit(2);
+        process.exit(EXIT.INCOMPLETE);
     }
 
     // ⚠️ 前置：场景频道必须是活的 ——
@@ -573,7 +574,7 @@ async function main() {
         console.log('\n失败项：');
         for (const f of failures) console.log('  - ' + f);
     }
-    process.exit(fail === 0 ? 0 : 1);
+    process.exit(fail === 0 ? EXIT.OK : EXIT.FAILURE);
 }
 
 main();

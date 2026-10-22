@@ -28,6 +28,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { OP_DEFS } = require('../src/offline/ops');
+const offline = require('../src/offline/index');
 const { GLOBAL_TOOLS, OP_PATH_FIELDS } = require('../src/tools/global-tools');
 
 /** 字段名里带这些词，就当作「路径类字段」。 */
@@ -35,6 +36,41 @@ const PATHISH = /path|file|url|dir/i;
 
 function tmpdir() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'cocos-mcp-opfields-'));
+}
+
+/** 最小可用的 prefab（一个根节点 + 一个子节点）。 */
+function makePrefab() {
+    return [
+        { __type__: 'cc.Prefab', data: { __id__: 1 }, optimizationPolicy: 0 },
+        {
+            __type__: 'cc.Node',
+            _name: 'Root',
+            _children: [{ __id__: 2 }],
+            _components: [],
+            _prefab: { __id__: 3 },
+            _active: true,
+            _lpos: { x: 0, y: 0, z: 0 },
+        },
+        {
+            __type__: 'cc.Node',
+            _name: 'Child',
+            _children: [],
+            _components: [],
+            _prefab: { __id__: 3 },
+            _active: true,
+            _lpos: { x: 0, y: 0, z: 0 },
+        },
+        {
+            __type__: 'cc.PrefabInfo',
+            root: { __id__: 1 },
+            asset: { __uuid__: '12345678-1234-5678-1234-567812345678', __expectedType__: 'cc.Prefab' },
+            fileId: 'ZmFrZS1maWxlLUlkLTEwMDAwMDAw',
+        },
+    ];
+}
+
+function writeJson(file, data) {
+    fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8');
 }
 
 function fakeCtx(projectDir) {
@@ -107,4 +143,27 @@ test('★ 白名单里的每个 op，路径字段都必须真的被拒（不是�
         );
         assert.ok(!fs.existsSync(victim), `${rule.op}.${rule.field} 越界时不得产生任何文件`);
     }
+});
+
+test('★ 离线层**自己**也要拦住越界的 op 路径（不能只靠 hub 那层兜着）', () => {
+    // ⚠️ 这一条守的是**第二层** ——
+    //    hub 层也有一道同样的检查，但离线模块是「独立可复用的单元」，
+    //    不假设调用方一定检查过（它自己的注释就是这么写的）。
+    //    只测 hub 层的话，把离线层那三个 assertOpPathAllowed 调用点删掉，
+    //    所有用例照样全绿 —— 第 7 轮复审实测过这个缺口。
+    const project = tmpdir();
+    const outside = tmpdir();
+    const prefab = path.join(project, 'a.prefab');
+    writeJson(prefab, makePrefab());
+    const victim = path.join(outside, 'victim.ts');
+
+    // 直接调**离线层**（完全不经过 hub）
+    const r = offline.editPrefab({
+        filePath: prefab,
+        allowedRoots: [project],
+        ops: [{ op: 'ensure-meta', path: victim }],
+    });
+    assert.ok(!r.ok, '★ 离线层必须自己拦住越界的 op 路径');
+    assert.match(r.error, /不在允许的目录范围/, r.error);
+    assert.ok(!fs.existsSync(victim), '★ 越界时不得产生任何文件');
 });
