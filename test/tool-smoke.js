@@ -115,6 +115,24 @@ class McpClient {
 function log(...a) { if (!AS_JSON) console.log(...a); }
 
 /**
+ * 「引擎侧 scene 频道中毒」的判定特征。
+ *
+ * ⚠️ 只认这两个**精确**特征，别放宽 ——
+ *    放宽了会把真正的 bug（比如某个工具返回了奇怪的错误）也当成引擎缺陷吞掉，
+ *    冒烟测试就失去了它唯一的作用：**发现真回归**。
+ *
+ * 背景见调研报告 6.8 / 6.11 / 6.14：一次 scene:open-scene 挂死之后，
+ * 整个 scene 频道就不再回应，此后所有场景操作都会以同样的信息失败。
+ * 这是 **Cocos 引擎自身的缺陷**，不是本项目的 bug。
+ */
+const POISON_PATTERNS = [/场景频道\*\*暂时无响应\*\*/, /场景频道已经卡死/];
+
+function isPoisonError(text) {
+    const s = String(text || '');
+    return POISON_PATTERNS.some((re) => re.test(s));
+}
+
+/**
  * 记录一条断言（不走 check()，因为它检查的是**已有响应**而不是再调一次工具）。
  * @param {boolean} cond 断言是否成立
  */
@@ -140,6 +158,22 @@ async function check(name, args, opts = {}) {
     }
     const ms = Date.now() - t0;
     const rejected = !!r.isError;
+    // ⚠️ 引擎缺陷与真 bug 必须分开记 ——
+    //    引擎侧 scene 频道中毒会让后续几十个场景检查以**同一条信息**失败。
+    //    把它们算作「失败」，等于把「一个根因」变成「几十个症状」——
+    //    既看不清问题，也会让冒烟测试的红绿失去意义（真正的回归会被淹没）。
+    //    这里只认精确特征，所以真正的回归仍然是失败。
+    if (rejected && isPoisonError(r.text)) {
+        results.push({
+            name,
+            status: 'skip',
+            ms,
+            detail: firstLine(r.text),
+            reason: '引擎缺陷：scene 频道中毒（调研报告 6.14）',
+        });
+        log(`  ⏭ ${name.padEnd(22)} ${String(ms).padStart(6)}ms  跳过：引擎缺陷 · scene 频道中毒`);
+        return r;
+    }
     const pass = opts.expectError ? rejected : !rejected;
     const detail = rejected ? firstLine(r.text) : summarize(r.data);
     results.push({ name, status: pass ? 'ok' : 'fail', ms, detail, expectError: !!opts.expectError, rejected });
@@ -301,12 +335,12 @@ async function main() {
                 'scene.close 不报假成功（引擎拒绝关闭时要明确说出来）',
                 closeRes.isError ? String(closeRes.text).slice(0, 100) : '已关闭'
             );
-            if (sceneUrl) {
-                const back = await client.call('asset.uuid', { url: sceneUrl });
-                await check('scene.open', { uuid: back.data && back.data.uuid ? back.data.uuid : back.data });
-                await new Promise((r) => setTimeout(r, 1200));
-            }
-            await check('asset.delete', { url: cs[0].url, confirm: true });
+            // ⚠️ 「切回原场景」这一步**故意放到最后**（收尾段）——
+            //    实测引擎在「已经有场景打开着」时再开另一个，会走「恢复上一个场景」
+            //    的路径并卡死（调研报告 6.11 / 6.14：既不 resolve 也不 reject），
+            //    一挂就是 90 秒，然后把整个 scene 频道拖死。
+            //    放中间的话，后面几十个场景检查会全部同源失败，
+            //    冒烟测试就从一个根因变成几十个症状 —— 真正的回归会被淹没。
         }
     } else {
         log('  ⚠️  scene.create 后没查到资源');
@@ -475,6 +509,22 @@ async function main() {
 
     // ── 9. 收尾 ──
     console.log('\n▸ 9. 收尾');
+    // ⚠️ 「切回原场景」放在**所有检查之后** ——
+    //    实测引擎在「已经有场景打开着」时再开另一个场景，会卡死 90 秒
+    //    并把整个 scene 频道拖死（调研报告 6.11 / 6.14）。
+    //    这是引擎缺陷，本项目绕不开；但放在最后，
+    //    它最多影响收尾，不会让前面几十个场景检查变成同源失败。
+    if (sceneUrl) {
+        log('  ℹ️  切回原场景（引擎缺陷高发点，可能耗时 90 秒并拖死 scene 频道）');
+        const back = await client.call('asset.uuid', { url: sceneUrl });
+        await check('scene.open', { uuid: back.data && back.data.uuid ? back.data.uuid : back.data });
+        await new Promise((r) => setTimeout(r, 1200));
+    }
+    // 切回之后，本轮建出来的场景不再是「当前场景」，这时才删得掉
+    if (cs.length) {
+        await check('asset.delete', { url: cs[0].url, confirm: true });
+    }
+
     // ⚠️ 根节点守卫要用**当前**场景的根节点名 ——
     //    第 1 段捕获的 rootName 属于旧场景，切换场景后它已经不是根了，
     //    拿它去测「根节点不可删」会误判（实测会真的删掉一个节点，守卫形同虚设）。
@@ -506,7 +556,8 @@ async function main() {
     }
 
     // ── 汇总 ──
-    const failed = results.filter((r) => r.status !== 'ok');
+    const skipped = results.filter((r) => r.status === 'skip');
+    const failed = results.filter((r) => r.status !== 'ok' && r.status !== 'skip');
     const byTool = new Map();
     for (const r of results) {
         if (!byTool.has(r.name)) byTool.set(r.name, []);
@@ -515,7 +566,21 @@ async function main() {
 
     console.log('\n' + '='.repeat(74));
     console.log(`总调用 ${results.length} 次，覆盖 ${byTool.size} 个工具`);
-    console.log(`通过 ${results.length - failed.length} / 失败 ${failed.length}`);
+    console.log(`通过 ${results.length - failed.length - skipped.length} / 失败 ${failed.length} / 跳过 ${skipped.length}`);
+    if (skipped.length) {
+        // ⚠️ 跳过项必须**显式说明**，不能悄悄消失 ——
+        //    「本轮没测到」和「测了没问题」是两回事，混在一起就是自欺欺人。
+        console.log('\n跳过明细（引擎缺陷，不是本项目的 bug —— 但本轮这些场景检查没覆盖到）：');
+        const byReason = new Map();
+        for (const s of skipped) {
+            if (!byReason.has(s.reason)) byReason.set(s.reason, []);
+            byReason.get(s.reason).push(s.name);
+        }
+        for (const [reason, names] of byReason) {
+            console.log(`  ⏭ ${reason}：${names.length} 项 —— ${names.join(', ')}`);
+        }
+        console.log('  ⇒ 要拿到完整的场景覆盖，需要重启 Cocos Creator 后重跑（编辑器是单实例）。');
+    }
 
     if (failed.length) {
         console.log('\n失败明细：');
