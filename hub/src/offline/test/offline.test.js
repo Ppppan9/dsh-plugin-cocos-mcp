@@ -1013,6 +1013,30 @@ test('★ assertOpPathAllowed：未配置 / 显式空 / 软链 三种语义', ()
     );
 });
 
+test('★ 离线读路径（queryPrefab / queryAnimation）也必须过目录白名单', () => {
+    const allowed = tmpdir();
+    const outside = tmpdir();
+    const p = path.join(outside, 'a.prefab');
+    const a = path.join(outside, 'a.anim');
+    writeJson(p, makePrefab());
+    writeJson(a, makeAnim());
+
+    // 读路径同样要守 —— 这个模块是独立可复用的，不能假设调用方检查过
+    const r1 = offline.queryPrefab({ filePath: p, selector: 'tree', allowedRoots: [allowed] });
+    assert.strictEqual(r1.ok, false, '★ queryPrefab 必须拒绝白名单外的路径');
+    assert.match(r1.error, /不在允许的目录范围/, r1.error);
+
+    const r2 = offline.queryAnimation({ filePath: a, selector: 'tree', allowedRoots: [allowed] });
+    assert.strictEqual(r2.ok, false, '★ queryAnimation 必须拒绝白名单外的路径');
+    assert.match(r2.error, /不在允许的目录范围/, r2.error);
+
+    // 白名单内正常放行
+    const inside = path.join(allowed, 'b.prefab');
+    writeJson(inside, makePrefab());
+    const r3 = offline.queryPrefab({ filePath: inside, selector: 'tree', allowedRoots: [allowed] });
+    assert.ok(r3.ok, r3.error);
+});
+
 test('★ planMetaWrite：保留已有 .meta 的全部字段', () => {
     const { planMetaWrite } = require('../write');
     const dir = tmpdir();

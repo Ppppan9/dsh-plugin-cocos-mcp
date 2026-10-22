@@ -227,6 +227,9 @@ const GLOBAL_TOOLS = [
                     selector: args.selector,
                     target: args.target,
                     maxDepth: args.maxDepth,
+                    // ⚠️ 必须传 —— 离线层的读路径护栏（queryPrefab 的自守）
+                    //    只在拿到 allowedRoots 时才生效，不传就等于那道闸是死的。
+                    allowedRoots: projectRoots(ctx),
                 }),
                 'cocos_prefab_query'
             );
@@ -390,7 +393,13 @@ const GLOBAL_TOOLS = [
             const offline = requireOffline();
             const filePath = assertInsideProject(ctx, args.filePath, 'anim 路径');
             return unwrapOffline(
-                offline.queryAnimation({ filePath, selector: args.selector, target: args.target }),
+                offline.queryAnimation({
+                    filePath,
+                    selector: args.selector,
+                    target: args.target,
+                    // ⚠️ 同 queryPrefab：必须传，否则离线层的读路径护栏是死的
+                    allowedRoots: projectRoots(ctx),
+                }),
                 'cocos_anim_query'
             );
         },

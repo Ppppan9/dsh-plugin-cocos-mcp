@@ -127,3 +127,33 @@ test('cocos_prefab_batch 也必须把 allowedRoots 传给离线层', async () =>
     assert.ok(Array.isArray(captured.allowedRoots), '★ 必须传 allowedRoots');
     assert.strictEqual(captured.allowedRoots[0], path.resolve(project));
 });
+
+test('cocos_prefab_query 必须把 allowedRoots 传给离线层（读路径也要有第二道闸）', async () => {
+    const project = tmpdir();
+    const prefab = path.join(project, 'a.prefab');
+    fs.writeFileSync(prefab, '[]\n');
+    const captured = await captureOfflineArgs(
+        'cocos_prefab_query',
+        'queryPrefab',
+        { filePath: prefab, selector: 'tree' },
+        fakeCtx(project)
+    );
+    assert.ok(captured, '应当调用到离线层');
+    assert.ok(Array.isArray(captured.allowedRoots), '★ 读路径也必须传 allowedRoots');
+    assert.strictEqual(captured.allowedRoots[0], path.resolve(project));
+});
+
+test('cocos_anim_query 必须把 allowedRoots 传给离线层（读路径也要有第二道闸）', async () => {
+    const project = tmpdir();
+    const anim = path.join(project, 'a.anim');
+    fs.writeFileSync(anim, '[]\n');
+    const captured = await captureOfflineArgs(
+        'cocos_anim_query',
+        'queryAnimation',
+        { filePath: anim, selector: 'tree' },
+        fakeCtx(project)
+    );
+    assert.ok(captured, '应当调用到离线层');
+    assert.ok(Array.isArray(captured.allowedRoots), '★ 读路径也必须传 allowedRoots');
+    assert.strictEqual(captured.allowedRoots[0], path.resolve(project));
+});

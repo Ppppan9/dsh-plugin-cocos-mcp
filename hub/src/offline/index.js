@@ -105,6 +105,14 @@ function queryPrefab(args) {
         const { filePath, selector } = args || {};
         if (!filePath) return err('缺少 filePath');
         if (!fs.existsSync(filePath)) return err(`文件不存在：${filePath}`);
+        // ⚠️ **读**也要过护栏 ——
+        //    之前只有 editPrefab / editAnimation 有，queryPrefab / queryAnimation 没有。
+        //    这个模块的定位是「独立的可复用单元」，不能假设调用方一定检查过
+        //    （assertOpPathAllowed 的注释就是这么写的）。
+        //    顶层调用方（hub）本来也守着，这里是同一套 roots 的第二道闸。
+        if (Array.isArray(args.allowedRoots)) {
+            assertOpPathAllowed(ctxForGuard(args.allowedRoots), path.resolve(filePath), 'prefab 路径');
+        }
         const ctx = loadPrefab(filePath);
 
         switch (selector) {
@@ -179,6 +187,10 @@ function queryAnimation(args) {
         const { filePath, selector } = args || {};
         if (!filePath) return err('缺少 filePath');
         if (!fs.existsSync(filePath)) return err(`文件不存在：${filePath}`);
+        // ⚠️ 读路径也要过护栏 —— 同 queryPrefab，这个模块不能假设调用方检查过
+        if (Array.isArray(args.allowedRoots)) {
+            assertOpPathAllowed(ctxForGuard(args.allowedRoots), path.resolve(filePath), 'anim 路径');
+        }
         const ctx = loadAnim(filePath);
 
         const allChannels = [];
