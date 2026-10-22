@@ -22,11 +22,17 @@ const { exitCodeFor } = require('./smoke-exit');
 const { poisonReason } = require('./smoke-poison');
 const { EXIT } = require('./exit-codes');
 const { cleanupVerdict } = require('./smoke-cleanup');
+const { makeFakeClient } = require('./fake-mcp-client');
 const AS_JSON = process.argv.includes('--json');
 const WITH_BUILD = process.argv.includes('--with-build');
 
 const results = [];
 let client = null;
+/**
+ * 「接线级」自测模式：用假 MCP 客户端跑**真实**的 main() 流程。
+ * @see test/fake-mcp-client.js
+ */
+const SELFTEST_WIRE = process.argv.includes('--selftest-wire');
 let sceneUrl = null;
 let tempNodeUuid = null;
 let tempCanvasUuid = null;
@@ -225,7 +231,11 @@ function summarize(d) {
 async function main() {
     console.log('Cocos MCP 全工具冒烟测试\n' + '='.repeat(74));
 
-    client = new McpClient();
+    // ⚠️ 自测模式用**假客户端**（进程内，不起子进程）——
+    //    这样 main() 的**真实流程**（含真实路径里那个 finish() 调用）都能跑到。
+    //    之前只有 --selftest-exit 直接调 finish() 这个函数，
+    //    「真实路径里那个调用」本身没有保护（第 8 轮复审实测：删掉它用例全绿）。
+    client = SELFTEST_WIRE ? makeFakeClient() : new McpClient();
     await client.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke', version: '1' } });
     client.notify('notifications/initialized');
     // ⚠️ 先取真实工具清单 —— 多编辑器时 hub 会给工具名加 <短名>__ 前缀，

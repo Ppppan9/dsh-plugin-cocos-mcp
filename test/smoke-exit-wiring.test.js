@@ -71,3 +71,17 @@ test('★ 频道中毒这个场景**绝不能**退出 0（H1 的核心）', () =
     assert.notStrictEqual(code, 0, '★ 有跳过时退出码绝不能是 0');
     assert.strictEqual(code, 2);
 });
+
+test('★ 真实流程里那个 finish() 调用不能被删（不然脚本不打印汇总、退出码 0）', () => {
+    // ⚠️ 第 8 轮复审实测过的缺口 ——
+    //    `--selftest-exit` 直接调 finish() 这个**函数**，
+    //    于是「main() 末尾那个真实的 finish() 调用」本身没有保护：
+    //    把它删掉，用例**一片绿**，而真实运行时脚本根本不打印汇总、退出码 0 → CI 判绿。
+    //
+    // ⇒ 这里用**假 MCP 客户端**（test/fake-mcp-client.js）让真实的 main() 流程跑一遍，
+    //    走的就是真实路径里那个调用。
+    const r = spawnSync(process.execPath, [SMOKE, '--selftest-wire'], { encoding: 'utf8', timeout: 60000 });
+    assert.notStrictEqual(r.status, 0, '★ 真实流程这一轮应当以非 0 结束（假客户端让 expectError 检查失败）');
+    assert.strictEqual(r.status, 1, '★ 应当是「有真失败」的退出码 1');
+    assert.match(String(r.stdout || ''), /通过 \d+ \/ 失败 \d+/, '★ 必须真的打印了汇总');
+});
