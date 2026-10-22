@@ -19,6 +19,7 @@ const os = require('os');
 
 const HUB = path.join(__dirname, '..', 'hub', 'bin.js');
 const { exitCodeFor } = require('./smoke-exit');
+const { cleanupVerdict } = require('./smoke-cleanup');
 const AS_JSON = process.argv.includes('--json');
 const WITH_BUILD = process.argv.includes('--with-build');
 
@@ -560,18 +561,16 @@ async function main() {
     }
     // 切回之后，本轮建出来的场景不再是「当前场景」，这时才删得掉。
     //
-    // ⚠️ 这里用 assert() 而不是 check() ——
-    //    check() 命中「频道不可用」的特征会记成 **skip**，
-    //    那就意味着「临时场景没删掉」被当成引擎的锅悄悄吞掉，
-    //    而它其实**真的留在用户的 assets/scenes/ 里**了。
-    //    残留是真实的问题，必须报成失败。
+    // ⚠️ 第一次删除失败**不要立刻**记成「残留」——
+    //    下面还有一轮兜底清理会再试一次并复查。
+    //    之前这里失败就记一条 leftover，而兜底成功之后那条记录**不会撤回**
+    //    → 明明已经删干净了，汇总却报「残留 1，需要人工清理」并 exit 3。
+    //    ⇒ 判定必须**以最终状态为准**：兜底复查说还剩几个，才算残留几个。
     if (cs.length) {
         const del = await client.call('asset.delete', { url: cs[0].url, confirm: true });
-        leftover(
-            !del.isError,
-            '本轮建出来的临时场景已清理（不能留在用户工程里）',
-            del.isError ? String(del.text).slice(0, 110) : '已删除'
-        );
+        if (del.isError) {
+            log(`  ℹ️  第一次删除没成功（${String(del.text).slice(0, 90)}），交给兜底清理重试`);
+        }
     }
 
     // ⚠️ 根节点守卫要用**当前**场景的根节点名 ——
@@ -603,20 +602,20 @@ async function main() {
     //    asset-db 频道与 scene 频道是两条独立的路，频道中毒时它照样能用。
     if (sceneName) {
         const sc2 = await client.call('asset.query', { pattern: `db://assets/scenes/${sceneName}.scene` });
-        const leftovers = (sc2.data && sc2.data.assets) || [];
-        for (const a of leftovers) {
+        const found = (sc2.data && sc2.data.assets) || [];
+        for (const a of found) {
             const d = await client.call('asset.delete', { url: a.url, confirm: true });
             if (!d.isError) log(`  ℹ️  兜底清理：已删除残留场景 ${a.url}`);
         }
-        if (leftovers.length) {
-            const still = await client.call('asset.query', { pattern: `db://assets/scenes/${sceneName}.scene` });
-            const remain = ((still.data && still.data.assets) || []).length;
-            leftover(
-                remain === 0,
-                '本轮建出来的临时场景已清理（不能留在用户工程里）',
-                remain ? `⚠️ 仍有 ${remain} 个残留，请手动删除：db://assets/scenes/${sceneName}.scene` : '已清理'
-            );
-        }
+        // ⚠️ 判定必须**以最终状态为准** ——
+        //    「删完之后还剩几个」才是唯一该报告的事实。
+        //    之前这里只在「第一次没删掉」时才判定，于是：
+        //    第一次失败 → 记一条 leftover → 兜底删成功了 → 那条记录不会撤回
+        //    → 明明删干净了，却报「残留 1，需要人工清理」并 exit 3。
+        const still = await client.call('asset.query', { pattern: `db://assets/scenes/${sceneName}.scene` });
+        const remain = ((still.data && still.data.assets) || []).length;
+        const verdict = cleanupVerdict(remain, sceneName);
+        leftover(verdict.ok, '本轮建出来的临时场景已清理（不能留在用户工程里）', verdict.detail);
     }
 
     // ── 汇总 ──

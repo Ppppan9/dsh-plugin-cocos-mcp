@@ -676,3 +676,46 @@ test('没有已注册项目时，路径护栏一律拒绝（不静默放行）',
     const ctx = { listEditors: () => [] };
     assert.throws(() => assertInsideProject(ctx, '/tmp/anything.prefab'), /没有已知的 Cocos 项目目录/);
 });
+
+// ────────────────────────────── 单测清单 ──────────────────────────────
+
+test('★ 单测清单不能漏：新增的 *.test.js 必须进 npm test 的文件列表', () => {
+    // ⚠️ 为什么是**显式清单**而不是通配 ——
+    //    `test/*.test.js` 会把 `test/real-behavior.test.js` 也圈进来，
+    //    而那是个**真机**测试（要开着 Cocos Creator 才跑得了），
+    //    混进单测会让人以为单测挂了。
+    //    但显式清单有它自己的坑：**新加的测试文件忘了加进去 → 静默不跑**。
+    //    这条断言就是防这个 —— 漏了会自己变红。
+    const pkg = JSON.parse(read('package.json'));
+    const script = pkg.scripts.test;
+    // 真机脚本：需要开着的 Cocos Creator，本来就不该进单测
+    const REAL_MACHINE = new Set(['real-behavior.test.js']);
+    const files = fs.readdirSync(path.join(ROOT, 'test')).filter((f) => f.endsWith('.test.js'));
+    assert.ok(files.length >= 3, 'test/ 下应该有多份单测');
+    for (const f of files) {
+        if (REAL_MACHINE.has(f)) {
+            assert.ok(
+                !script.includes(f),
+                `test/${f} 是真机测试，不该进 npm test 的单测清单（会让人以为单测挂了）`
+            );
+            continue;
+        }
+        assert.ok(
+            script.includes(f),
+            `test/${f} 没有进 package.json 的 test 脚本 —— 新增的测试文件忘了加进去会**静默不跑**`
+        );
+    }
+});
+
+test('★ README 描述的单测范围要跟 package.json 实际跑的一致', () => {
+    const pkg = JSON.parse(read('package.json'));
+    const script = pkg.scripts.test;
+    // README 说「test/*.test.js」时，实际必须是显式清单（因为真机脚本被排除了）——
+    //   两者不一致会让人以为新加的测试会自动被跑。
+    if (/test\/\*\.test\.js/.test(readme)) {
+        assert.ok(
+            !/test\/\*\.test\.js\s/.test(script.replace(/test\/[^*]+\.test\.js/g, '')),
+            'README 说单测范围是 test/*.test.js，但 package.json 实际是显式清单 —— 说法要改成实际的'
+        );
+    }
+});
