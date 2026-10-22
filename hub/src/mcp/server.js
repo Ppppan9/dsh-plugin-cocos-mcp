@@ -118,6 +118,17 @@ class McpServer {
                     return await this._onInitialize(msg);
                 // 注：notifications/initialized 已在统一早退里处理（无 id → return null），
                 // 状态在 _onInitialize 时就置好了，这里不需要分支。
+                //
+                // ⚠️ `notifications/cancelled` 是**有意忽略**的，不是漏了 ——
+                //    MCP 规范里它是 SHOULD（不是 MUST）让接收方中止。
+                //    这里选择「收到即丢弃、让操作跑完」：
+                //      · 半途取消一个**写操作**（比如 scene.open 提交到一半时中止）
+                //        比「让它跑完」更容易留下不一致的工程状态；
+                //      · 引擎侧一旦被打断，很可能停在「半开」状态 ——
+                //        那正是会把 scene 频道彻底毒掉的形态（调研报告 6.10 / 6.11）。
+                //    代价：取消一个耗时调用（比如最长 90 秒的 scene.open）**不会真的停下来**，
+                //    它仍会跑完并产生副作用。README 的协议说明里写清了这一点。
+                //    ⚠️ 别「顺手」改成半途取消 —— 那会比现在危险。
                 case 'notifications/cancelled':
                 case 'notifications/progress':
                 case 'notifications/roots/list_changed':
