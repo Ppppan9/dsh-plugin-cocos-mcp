@@ -310,7 +310,7 @@ async function main() {
 
     // ⚠️ 根节点名必须**动态解析**。
     //    写死 'Scene' 的话，编辑器当前打开的如果是别的场景（比如上一轮测试留下的
-    //    __ab_真实_xxx），后面所有 node.create 都会以「找不到节点 Scene」失败，
+    //    __smoke_scene_xxx），后面所有 node.create 都会以「找不到节点 Scene」失败，
     //    整份冒烟报告全是噪音。
     let rootName = (tree.data && tree.data.root) || 'Scene';
     if (rootName === 'Scene' && !(tree.data && tree.data.root)) {
