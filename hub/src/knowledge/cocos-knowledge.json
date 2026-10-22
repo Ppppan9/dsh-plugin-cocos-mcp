@@ -158,7 +158,7 @@
       "rules": [
         "position 是本地坐标（相对父节点 UITransform 的锚点对齐后的坐标系）。",
         "父节点有 Layout / Widget 时，子节点的 position 会被它们覆盖，不要手动改。",
-        "rotation 是四元数；只绕 Z 轴时用 {x:0,y:0,z:sin(r/2),w:cos(r/2)}，本项目 node.transform 的 rotation 参数已帮你转好。"
+        "rotation 是**欧拉角** {x,y,z}（单位：度），**不是四元数** —— 真机 dump 里它的 name 是 eulerAngles、type 是 cc.Vec3。本项目 node.transform 的 rotation 传一个数字即可（= 绕 Z 轴多少度），内部会转成 {x:0,y:0,z:角度}；传四元数会被当成 cc.Vec4 塞进去，类型对不上。"
       ]
     },
     "anchorPoint": {

@@ -443,7 +443,10 @@ const EDITOR_TOOLS = [
     T('node.transform', {
         title: '设置节点变换',
         description:
-            '设置 position / scale / rotation。rotation 传角度（度）即可，内部转成四元数。\n' +
+            '设置 position / scale / rotation。\n' +
+            'rotation 传**绕 Z 轴的角度（度）**即可，内部转成欧拉角 {x:0,y:0,z:角度}。\n' +
+            '⚠️ 引擎的 rotation 属性是**欧拉角（cc.Vec3，单位度）**，不是四元数 ——\n' +
+            '   传四元数会被当成 cc.Vec4 塞进去，类型对不上。\n' +
             'position 传 {x,y}（2D 项目）或 {x,y,z}。',
         inputSchema: {
             type: 'object',

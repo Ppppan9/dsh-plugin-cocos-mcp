@@ -1390,6 +1390,13 @@ function createHandlers(ctx) {
         },
 
         'asset.copy': async (args) => {
+            // ⚠️ 同族的 move / create / save / delete 都过 requireAssetUrl，只有 copy 没有 ——
+            //    那等于把「复制任意路径」的能力透给了模型。
+            //    （引擎侧到底接不接受非 db:// 的 URL，没法离线证实；
+            //      但纵深防御不依赖引擎的实现细节 —— 自己的口子自己堵上。）
+            req(args, ['from', 'to'], 'asset.copy');
+            requireAssetUrl(args.from);
+            requireAssetUrl(args.to);
             const r = await send('asset-db', 'copy-asset', [args.from, args.to]);
             return { from: args.from, to: args.to, info: r };
         },

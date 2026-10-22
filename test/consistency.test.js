@@ -772,3 +772,47 @@ test('★ README 描述的单测范围要跟 package.json 实际跑的一致', (
         '单测清单里不该有真机脚本（它要开着 Cocos Creator 才跑得了）'
     );
 });
+
+test('★ 知识库不能把 rotation 说成四元数（引擎要的是欧拉角 cc.Vec3）', () => {
+    // ⚠️ 背景：调研报告 6.x 有真机 dump 佐证 ——
+    //    "rotation": {"name":"eulerAngles","value":{"x":-117.9,...},"type":"cc.Vec3"}
+    //    知识库却教模型用 {x,y,z,w} 四元数 → inferDump 判成 cc.Vec4，
+    //    而属性是 cc.Vec3 → 类型对不上，模型照着做就错。
+    const kb = read('hub/src/knowledge/cocos-knowledge.json');
+    const rules = (JSON.parse(kb).coordinates.uiLocalVsWorld.rules || []).join('\n');
+    // ⚠️ 判据用**具体的假命题**，不用「出现四元数就算错」——
+    //    正确写法里也会提到「不是四元数」以提醒模型（那是提醒，不是教法）。
+    for (const lie of ['rotation 是四元数', 'rotation 是四元数；', '用四元数表示']) {
+        assert.ok(!rules.includes(lie), `知识库不要说「${lie}」—— 引擎的 rotation 是欧拉角（cc.Vec3，度）`);
+    }
+    assert.ok(!/sin\(r\/2\)|cos\(r\/2\)/.test(rules), '知识库不能给四元数的换算公式（照着做引擎会收到 cc.Vec4）');
+    assert.match(rules, /rotation[^\n]*欧拉角/, '知识库应说明 rotation 是欧拉角');
+});
+
+test('★ 工具描述不能承诺代码没做的事（node.transform 曾说「内部转成四元数」）', () => {
+    const { EDITOR_TOOLS } = require('../hub/src/tools/editor-tools');
+    const t = EDITOR_TOOLS.find((x) => x.name === 'node.transform');
+    assert.ok(t, 'node.transform 必须存在');
+    // ⚠️ 同上：用**具体的假命题**做判据（正确写法里也会出现「不是四元数」以作提醒）。
+    assert.ok(
+        !/内部转成四元数/.test(t.description),
+        'node.transform 的描述不能承诺「内部转成四元数」—— 代码只把数字转成欧拉角 {x:0,y:0,z:角度}'
+    );
+    assert.match(t.description, /欧拉角/, '描述应说清引擎要的是欧拉角');
+});
+
+test('★ 资源类 op 必须都过 requireAssetUrl（asset.copy 曾是同族里唯一的例外）', () => {
+    // ⚠️ 同族的 move/create/save/delete 都过 requireAssetUrl，
+    //    只有 copy 没有 —— 等于把「复制任意路径」的能力透给模型。
+    const src = read('extension/bridge/handlers.js');
+    for (const op of ['asset.create', 'asset.save', 'asset.move', 'asset.delete', 'asset.copy']) {
+        const i = src.indexOf(`'${op}':`);
+        assert.ok(i >= 0, `找不到 op ${op}`);
+        const body = src.slice(i, i + 900);
+        assert.match(
+            body,
+            /requireAssetUrl\(/,
+            `${op} 必须过 requireAssetUrl（否则等于把任意路径透给编辑器）`
+        );
+    }
+});
