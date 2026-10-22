@@ -108,6 +108,22 @@ test('★ 自测模式必须**最先**执行（挪到 main() 之后会先干等�
     assert.strictEqual(first, 'SELFTEST_EXIT_MODE', '★ 自测模式必须是第一件事（否则会先跑一遍真实流程）');
 });
 
+test('★ 假载荷不能太假：真实流程必须真的跑到大部分工具', () => {
+    // ⚠️ 载荷太假的危害：asset.query 返回空数组 → 冒烟脚本里「场景生命周期」
+    //    那一整段被跳过 → 10 个工具在「真实流程」模式下**根本没被跑到**，
+    //    而接线看着被测了、真实路径的行为却没被测到（假货）。
+    //    ⇒ 假客户端在 close() 时报告跑到了几个工具，这里给一条下限。
+    const r = spawnSync(process.execPath, [SMOKE, '--selftest-wire'], {
+        encoding: 'utf8',
+        timeout: 60000,
+        env: scriptEnv(),
+    });
+    const m = String(r.stderr || '').match(/FAKE_CALLED_TOOLS:(\d+)/);
+    assert.ok(m, '★ 假客户端应当报告跑到的工具数（否则这条断言会空转）');
+    const n = Number(m[1]);
+    assert.ok(n >= 65, `★ 真实流程只跑到了 ${n} 个工具 —— 假载荷太假，大段真实路径没被测到`);
+});
+
 test('★ 真实流程里那个 finish() 调用不能被删（不然脚本不打印汇总、退出码 0）', () => {
     // ⚠️ 第 8 轮复审实测过的缺口 ——
     //    `--selftest-exit` 直接调 finish() 这个**函数**，

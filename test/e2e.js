@@ -26,6 +26,8 @@ const { spawn } = require('child_process');
 //    而且它无法 100% 证明没碰到）。
 //    ⇒ 被 NODE_TEST_CONTEXT 标记为 test runner 时，直接退出；
 //      只有**显式当脚本跑**（npm run test:smoke / node test/xxx.js）才动。
+const { EXIT } = require('./exit-codes');
+
 if (process.env.NODE_TEST_CONTEXT) {
     console.error('（跳过：这是真机脚本，需要显式运行，例如 npm run test:smoke）');
     process.exit(EXIT.OK);
@@ -37,7 +39,6 @@ const os = require('os');
 
 const HUB = path.join(__dirname, '..', 'hub', 'bin.js');
 const { requireSceneChannel } = require('./editor-health');
-const { EXIT } = require('./exit-codes');
 const KEEP_SCENE = process.argv.includes('--keep-scene');
 
 let pass = 0;

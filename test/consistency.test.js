@@ -81,17 +81,38 @@ test('handlers.js 里每个 Bridge 操作都已被暴露成工具（或明确标
 });
 
 test('danger 级工具的 confirm 约束在 schema 里成立', () => {
-    const { ToolRegistry } = require('../hub/src/tools');
+    const { ToolRegistry, EDITOR_TOOLS, GLOBAL_TOOLS } = require('../hub/src/tools');
     const reg = new ToolRegistry({ getClient: () => null, listEditors: () => [] });
     const list = reg.list();
+    // ⚠️ 判定「这个工具危不危险」必须用**源定义**的 safety ——
+    //    reg.list() 返回的是 MCP 形态（toMcpTool），**没有 safety 字段**，
+    //    而 annotations.destructiveHint 又是从 safety 推导出来的。
+    //    用推导结果去决定「要查哪些工具」就是**自指**：
+    //    一旦推导逻辑坏了（destructiveHint 恒为 false），
+    //    这条断言会**整体跳过**、一片绿，而破坏性工具早就没有 confirm 了。
+    const raw = new Map();
+    for (const t of [...EDITOR_TOOLS, ...GLOBAL_TOOLS]) raw.set(t.name, t);
+    let dangerCount = 0;
     for (const t of list) {
-        if (!t.annotations || !t.annotations.destructiveHint) continue;
+        const base = t.name.includes('__') ? t.name.slice(t.name.indexOf('__') + 2) : t.name;
+        const src = raw.get(base);
+        const isDanger = !!(src && src.safety === 'danger');
+        // 独立地核对一次标注：必须与源头的分级一致
+        assert.strictEqual(
+            !!(t.annotations && t.annotations.destructiveHint),
+            isDanger,
+            `${t.name} 的 destructiveHint 与 safety 不一致（客户端会据此决定要不要弹确认）`
+        );
+        if (!isDanger) continue;
+        dangerCount++;
         assert.ok(
             (t.inputSchema.required || []).includes('confirm'),
             `${t.name} 标为破坏性但 confirm 不在 required`
         );
         assert.ok(t.inputSchema.properties.confirm, `${t.name} 缺 confirm 属性定义`);
     }
+    // 非空断言：防止上面整段因为「一个 danger 工具都没识别出来」而空转
+    assert.ok(dangerCount > 0, '一个 danger 工具都没识别出来 —— 判定逻辑本身坏了');
 });
 
 test('危险操作不会在 schema 里留下占位字段', () => {

@@ -21,6 +21,8 @@ const { spawn } = require('child_process');
 //    而且它无法 100% 证明没碰到）。
 //    ⇒ 被 NODE_TEST_CONTEXT 标记为 test runner 时，直接退出；
 //      只有**显式当脚本跑**（npm run test:smoke / node test/xxx.js）才动。
+const { EXIT } = require('./exit-codes');
+
 if (process.env.NODE_TEST_CONTEXT) {
     console.error('（跳过：这是真机脚本，需要显式运行，例如 npm run test:smoke）');
     process.exit(EXIT.OK);
@@ -33,7 +35,6 @@ const os = require('os');
 const HUB = path.join(__dirname, '..', 'hub', 'bin.js');
 const { exitCodeFor } = require('./smoke-exit');
 const { poisonReason } = require('./smoke-poison');
-const { EXIT } = require('./exit-codes');
 const { cleanupVerdict } = require('./smoke-cleanup');
 const { makeFakeClient } = require('./fake-mcp-client');
 const AS_JSON = process.argv.includes('--json');
@@ -267,15 +268,24 @@ async function main() {
     const declared = (await client.request('tools/list', {})).result.tools;
     const staticIssues = [];
     const seen = new Set();
+    let destructiveCount = 0;
     for (const t of declared) {
         if (seen.has(t.name)) staticIssues.push(`工具名重复：${t.name}`);
         seen.add(t.name);
         if (!t.description || t.description.length < 10) staticIssues.push(`${t.name} 描述过短`);
         if (!t.inputSchema || t.inputSchema.type !== 'object') staticIssues.push(`${t.name} 缺 inputSchema`);
         if (t.annotations && t.annotations.destructiveHint) {
+            destructiveCount++;
             const req = (t.inputSchema && t.inputSchema.required) || [];
             if (!req.includes('confirm')) staticIssues.push(`${t.name} 是破坏性操作但 confirm 不在 required`);
         }
+    }
+    // ⚠️ 「一个破坏性工具都没标」本身就是个问题 ——
+    //    上面那段检查是**按 destructiveHint 决定查哪些工具**的，
+    //    一旦这个标注（客户端据此决定要不要弹确认）整体失效，
+    //    那段检查会**静默跳过**、一片绿。所以要独立地确认它不是空的。
+    if (!destructiveCount) {
+        staticIssues.push('工具面里一个破坏性工具都没有（destructiveHint 全为 false）—— 客户端不会弹确认');
     }
     results.push({
         name: '(静态) 工具面自检',
