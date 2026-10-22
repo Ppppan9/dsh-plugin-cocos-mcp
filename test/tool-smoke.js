@@ -606,16 +606,12 @@ async function main() {
     }
 
     // ── 汇总 ──
-    const skipped = results.filter((r) => r.status === 'skip');
-    const leftovers = results.filter((r) => r.status === 'leftover');
-    const failed = results.filter((r) => r.status !== 'ok' && r.status !== 'skip' && r.status !== 'leftover');
-    const byTool = new Map();
-    for (const r of results) {
-        if (!byTool.has(r.name)) byTool.set(r.name, []);
-        byTool.get(r.name).push(r);
-    }
-
-    finish(results, declared, byTool, skipped, leftovers, failed, () => client.close());
+    // ⚠️ 三个桶（skipped / leftovers / failed）**不要在调用方算好再传进来** ——
+    //    它们都是 results 按 status 派生出来的，传参就多了一份真相：
+    //    传错顺序不会报错（都是数组）但行为会变；
+    //    而且「打印的汇总」和「退出码用的计数」可能来自两份不同的计算。
+    //    ⇒ 统一在 finish() 内部算，只有一份真相。
+    finish(results, declared, () => client.close());
 }
 
 /**
@@ -630,13 +626,19 @@ async function main() {
  *
  * @param {Array} results 每条断言记录
  * @param {Array} declared 工具清单（用于「未覆盖的工具」）
- * @param {Map} byTool 工具名 → 记录列表
- * @param {Array} skipped 跳过项
- * @param {Array} leftovers 残留项
- * @param {Array} failed 失败项
  * @param {Function|null} cleanup 退出前的清理（关掉客户端）
  */
-function finish(results, declared, byTool, skipped, leftovers, failed, cleanup) {
+function finish(results, declared, cleanup) {
+    // ── 派生量全部在这里算 —— 打印与退出码用同一份 ──
+    const skipped = results.filter((r) => r.status === 'skip');
+    const leftovers = results.filter((r) => r.status === 'leftover');
+    const failed = results.filter((r) => r.status !== 'ok' && r.status !== 'skip' && r.status !== 'leftover');
+    const byTool = new Map();
+    for (const r of results) {
+        if (!byTool.has(r.name)) byTool.set(r.name, []);
+        byTool.get(r.name).push(r);
+    }
+
     console.log('\n' + '='.repeat(74));
     console.log(`总调用 ${results.length} 次，覆盖 ${byTool.size} 个工具`);
     console.log(
@@ -722,15 +724,7 @@ if (process.argv.some((a) => a.startsWith('--selftest-exit='))) {
         fake.push({ name: 'selftest.skip' + k, status: 'skip', ms: 0, detail: '自测', reason: '自测用' });
     }
     for (let k = 0; k < nlf; k++) fake.push({ name: 'selftest.left' + k, status: 'leftover', ms: 0, detail: '自测' });
-    const byToolFake = new Map();
-    for (const r of fake) {
-        if (!byToolFake.has(r.name)) byToolFake.set(r.name, []);
-        byToolFake.get(r.name).push(r);
-    }
-    const sk = fake.filter((r) => r.status === 'skip');
-    const lf = fake.filter((r) => r.status === 'leftover');
-    const fl = fake.filter((r) => r.status !== 'ok' && r.status !== 'skip' && r.status !== 'leftover');
-    finish(fake, [], byToolFake, sk, lf, fl, null);
+    finish(fake, [], null);
 }
 
 
