@@ -1,5 +1,7 @@
 # cocos-mcp
 
+[![CI](https://github.com/Ppppan9/dsh-plugin-cocos-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Ppppan9/dsh-plugin-cocos-mcp/actions/workflows/ci.yml)
+
 **给 Cocos Creator 3.8.x 的 MCP（Model Context Protocol）服务。**
 让 Claude Code / Cursor / Codex / 任何 MCP 客户端直接操控 Cocos Creator 编辑器与项目文件。
 
