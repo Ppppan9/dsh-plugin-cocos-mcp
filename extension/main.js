@@ -185,7 +185,7 @@ async function startBridge() {
     });
     log(`已注册到 ${registryFile}（shortName=${shortName}）`);
 
-    heartbeatTimer = setInterval(() => {
+    heartbeatTimer = trackInterval(() => {
         try {
             writeRegistry({
                 pid: process.pid,
@@ -207,19 +207,60 @@ async function startBridge() {
     return bridge;
 }
 
+/**
+ * 本扩展创建过的**所有**定时器句柄。
+ *
+ * ⚠️ 为什么是「全部」而不是「最后一个」：
+ *    `load()` 被调用第二次时，第一个 watcher 的 interval 会被覆盖成**孤儿** ——
+ *    它仍在跑、仍在读 `.dev/refresh`，卸载之后还能触发 `restart-package`
+ *    → **把已经禁用的扩展重新启用**。
+ *    实测（第 11 轮复审 G-7）：两次 load 后 unload 仍残留 2 个 interval，
+ *    且卸载态真的调到了 `Editor.Package.disable/enable`。
+ *    ⇒ 停的时候**全部**清掉，而不是只清模块级变量当前指向的那一个。
+ *
+ * ⚠️ 例外：`.dev/refresh` 里 `restart-package` 用的那个 300ms setTimeout
+ *    **故意不登记** —— 它的作用正是「禁用后 300ms 再启用」，
+ *    登记了就会被 unload 顺手取消 ⇒ 扩展再也回不来。
+ */
+const timerHandles = new Set();
+
+/** 建一个 interval 并登记（停的时候统一清）。 */
+function trackInterval(fn, ms) {
+    const t = setInterval(fn, ms);
+    if (t.unref) t.unref();
+    timerHandles.add(t);
+    return t;
+}
+
+/** 建一个 timeout 并登记。 */
+function trackTimeout(fn, ms) {
+    const t = setTimeout(fn, ms);
+    timerHandles.add(t);
+    return t;
+}
+
+/** 清掉**所有**登记过的定时器。 */
+function clearAllTimers() {
+    for (const t of timerHandles) {
+        try {
+            clearInterval(t);
+        } catch (_) {
+            /* ignore */
+        }
+        try {
+            clearTimeout(t);
+        } catch (_) {
+            /* ignore */
+        }
+    }
+    timerHandles.clear();
+    refreshWatcher = null;
+    refreshTimer = null;
+    heartbeatTimer = null;
+}
+
 async function stopBridge() {
-    if (refreshWatcher) {
-        clearInterval(refreshWatcher);
-        refreshWatcher = null;
-    }
-    if (refreshTimer) {
-        clearTimeout(refreshTimer);
-        refreshTimer = null;
-    }
-    if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-        heartbeatTimer = null;
-    }
+    clearAllTimers();
     removeRegistry();
     if (bridge) {
         try {
@@ -234,6 +275,12 @@ async function stopBridge() {
 
 exports.load = async function load() {
     try {
+        // ⚠️ **幂等**：load 第二次时，先把上一次留下的东西**彻底**停掉。
+        //    否则旧的 interval 变成孤儿 —— 它还活着、还在读 .dev/refresh，
+        //    卸载之后能把**已禁用**的扩展重新启用（第 11 轮复审 G-7 实测）。
+        if (bridge || timerHandles.size) {
+            await stopBridge();
+        }
         await startBridge();
         startRefreshWatcher();
     } catch (err) {
@@ -305,18 +352,18 @@ function startRefreshWatcher() {
     }
     // 轮询：500ms 一次，只在文件 mtime 变化时才去读（避免无意义 IO）
     let lastMtime = 0;
-    const timer2 = setInterval(() => {
+    const timer2 = trackInterval(() => {
         try {
             const st = fs.statSync(signalFile);
             if (st.mtimeMs && st.mtimeMs !== lastMtime) {
                 lastMtime = st.mtimeMs;
-                if (!refreshTimer) refreshTimer = setTimeout(check, 80);
+                if (!refreshTimer) refreshTimer = trackTimeout(check, 80);
             }
         } catch (_) {
             /* no signal file */
         }
     }, 500);
-    if (timer2.unref) timer2.unref();
+    // ⚠️ unref 已由 trackInterval 统一处理（这里不再重复）。
     refreshWatcher = timer2;
 }
 
