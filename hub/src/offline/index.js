@@ -501,13 +501,20 @@ function batchMultiFile(files, args) {
     }
 
     if (args.dryRun) {
+        // ⚠️ dryRun 的每项字段也要和**单文件 dryRun** 一致 ——
+        //    单文件 dryRun 返回 {filePath, dryRun, wouldChange, diff, steps, pendingMeta}，
+        //    这里少了 steps / pendingMeta（消费方读它们会静默拿到 undefined）。
+        //    同一个工具的两种形态、两个分支，响应契约都不能分叉。
         return ok({
             mode: 'multi',
             dryRun: true,
             files: prepared.map((p) => ({
                 filePath: p.file.filePath,
+                dryRun: true,
                 wouldChange: p.plan.allChanges.length,
                 diff: p.plan.allChanges,
+                steps: p.plan.steps,
+                pendingMeta: p.plan.metaPlans.map((m) => m.path),
             })),
         });
     }

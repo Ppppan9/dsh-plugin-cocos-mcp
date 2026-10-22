@@ -162,6 +162,25 @@ function assert(cond, name, detail) {
 }
 
 /**
+ * 记录一条「**有东西留在用户工程里**」的断言。
+ *
+ * ⚠️ 为什么要单独一类，而不是记成 fail ——
+ *    临时场景删不掉，通常是因为引擎挂死导致「切回原场景」失败、
+ *    临时场景仍是当前场景（Bridge 会挡住删当前打开的场景）。
+ *    根因是**引擎缺陷**，不是本项目的回归 ——
+ *    把它算进「失败」会让 exit 1 同时表示两种完全不同的东西，
+ *    CI 一旦被引擎缺陷染红，人就会开始忽略红灯，信号就没了。
+ *
+ *    但它也**不能悄悄跳过** —— 文件真的留在用户工程里了。
+ *    ⇒ 单独一类 + 独立退出码（3），输出里点名要删哪个文件。
+ */
+function leftover(cond, name, detail) {
+    results.push({ name, status: cond ? 'ok' : 'leftover', ms: 0, detail: detail || '' });
+    log(`  ${cond ? '✅' : '🧹'} ${name}${detail ? '  ' + String(detail).slice(0, 110) : ''}`);
+    return cond;
+}
+
+/**
  * @param {object} opts
  *   expectError: true  → 期望被拒绝（护栏/校验类用例），拒绝才算通过
  */
@@ -543,7 +562,7 @@ async function main() {
     //    残留是真实的问题，必须报成失败。
     if (cs.length) {
         const del = await client.call('asset.delete', { url: cs[0].url, confirm: true });
-        assert(
+        leftover(
             !del.isError,
             '本轮建出来的临时场景已清理（不能留在用户工程里）',
             del.isError ? String(del.text).slice(0, 110) : '已删除'
@@ -587,17 +606,18 @@ async function main() {
         if (leftovers.length) {
             const still = await client.call('asset.query', { pattern: `db://assets/scenes/${sceneName}.scene` });
             const remain = ((still.data && still.data.assets) || []).length;
-            assert(
+            leftover(
                 remain === 0,
                 '本轮建出来的临时场景已清理（不能留在用户工程里）',
-                remain ? `仍有 ${remain} 个残留：${sceneName}.scene` : '已清理'
+                remain ? `⚠️ 仍有 ${remain} 个残留，请手动删除：db://assets/scenes/${sceneName}.scene` : '已清理'
             );
         }
     }
 
     // ── 汇总 ──
     const skipped = results.filter((r) => r.status === 'skip');
-    const failed = results.filter((r) => r.status !== 'ok' && r.status !== 'skip');
+    const leftovers = results.filter((r) => r.status === 'leftover');
+    const failed = results.filter((r) => r.status !== 'ok' && r.status !== 'skip' && r.status !== 'leftover');
     const byTool = new Map();
     for (const r of results) {
         if (!byTool.has(r.name)) byTool.set(r.name, []);
@@ -606,7 +626,10 @@ async function main() {
 
     console.log('\n' + '='.repeat(74));
     console.log(`总调用 ${results.length} 次，覆盖 ${byTool.size} 个工具`);
-    console.log(`通过 ${results.length - failed.length - skipped.length} / 失败 ${failed.length} / 跳过 ${skipped.length}`);
+    console.log(
+        `通过 ${results.length - failed.length - skipped.length - leftovers.length}` +
+        ` / 失败 ${failed.length} / 跳过 ${skipped.length} / 残留 ${leftovers.length}`
+    );
     if (skipped.length) {
         // ⚠️ 跳过项必须**显式说明**，不能悄悄消失 ——
         //    「本轮没测到」和「测了没问题」是两回事，混在一起就是自欺欺人。
@@ -627,6 +650,11 @@ async function main() {
         //    退出码会单独标成「未跑完」，让 CI 不要把它当成通过。
         console.log('  ⚠️ 健康闸门不区分根因 —— 引擎挂死与本项目的 bug 打的是同一句话。');
         console.log('     本轮按引擎缺陷记账，但退出码会标成「未跑完」，不当成通过。');
+    }
+
+    if (leftovers.length) {
+        console.log('\n⚠️ 残留明细（有文件留在用户工程里，需要人工清理 —— 通常是引擎挂死导致删不掉当前场景）：');
+        for (const l of leftovers) console.log(`  🧹 ${l.name}  ${l.detail}`);
     }
 
     if (failed.length) {
@@ -657,7 +685,7 @@ async function main() {
     // 而健康闸门**不区分根因**：引擎挂死和「本项目的 bug 把频道搞死」
     // 打出来的是同一句话，两者会被一起吞掉。
     // ⇒ 有跳过时必须用**独立退出码**，让 CI 把它读成「未跑完」而不是「通过」。
-    process.exit(exitCodeFor(failed.length, skipped.length));
+    process.exit(exitCodeFor(failed.length, skipped.length, leftovers.length));
 }
 
 main().catch((e) => {

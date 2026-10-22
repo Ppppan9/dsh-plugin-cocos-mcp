@@ -20,12 +20,15 @@
 /**
  * @param {number} failedCount 真失败数
  * @param {number} skippedCount 跳过数（引擎缺陷导致本轮没跑完的检查）
- * @returns {number} 0=全部通过 / 1=有真失败 / 2=无失败但没跑完
+ * @param {number} leftoverCount 残留数（文件留在用户工程里，需要人工清理）
+ * @returns {number} 0=全部通过 / 1=有真失败 / 2=无失败但没跑完 / 3=有残留
  */
-function exitCodeFor(failedCount, skippedCount) {
+function exitCodeFor(failedCount, skippedCount, leftoverCount) {
     const failed = Number(failedCount) || 0;
     const skipped = Number(skippedCount) || 0;
+    const leftover = Number(leftoverCount) || 0;
     if (failed > 0) return 1;
+    if (leftover > 0) return 3;
     if (skipped > 0) return 2;
     return 0;
 }

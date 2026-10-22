@@ -272,3 +272,30 @@ test('★ 多文件模式的响应契约要和单文件一致（每项都要有 
         assert.strictEqual(item.ok, true);
     }
 });
+
+test('★ 多文件 dryRun 的每项字段也要和单文件 dryRun 一致（steps / pendingMeta 不能少）', () => {
+    const dir = tmpdir();
+    const a = path.join(dir, 'a.prefab');
+    const b = path.join(dir, 'b.prefab');
+    writeJson(a, makePrefab());
+    writeJson(b, makePrefab());
+    const beforeA = fs.readFileSync(a, 'utf8');
+    const beforeB = fs.readFileSync(b, 'utf8');
+    const opsJson = makeOpsFile(dir, {
+        files: [
+            { filePath: a, ops: [{ op: 'set-label-text', node: 'Child', text: 'A' }] },
+            { filePath: b, ops: [{ op: 'set-label-text', node: 'Child', text: 'B' }] },
+        ],
+    });
+    const r = offline.batchPrefab({ opsJsonPath: opsJson, dryRun: true, allowedRoots: [dir] });
+    assert.ok(r.ok, r.error);
+    assert.strictEqual(r.data.dryRun, true);
+    for (const item of r.data.files) {
+        assert.ok(Array.isArray(item.diff), `★ ${item.filePath} dryRun 缺 diff`);
+        assert.ok(Array.isArray(item.steps), `★ ${item.filePath} dryRun 缺 steps`);
+        assert.ok(Array.isArray(item.pendingMeta), `★ ${item.filePath} dryRun 缺 pendingMeta`);
+        assert.strictEqual(item.dryRun, true);
+    }
+    assert.strictEqual(fs.readFileSync(a, 'utf8'), beforeA, 'dryRun 不得写盘');
+    assert.strictEqual(fs.readFileSync(b, 'utf8'), beforeB, 'dryRun 不得写盘');
+});
