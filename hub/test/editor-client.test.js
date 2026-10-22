@@ -39,6 +39,15 @@ function clientFor(url) {
 }
 
 test('★ 响应体超上限 → 必须 reject（不能留下悬挂的 promise）', async () => {
+    // ⚠️ **这条用例到底在保护什么，要说准**（第 10 轮复审 U-1 实测结论）：
+    //    · 它**能**抓住「显式 reject 被删掉、只剩 req.destroy()」这种改坏
+    //      （实测：RED）；
+    //    · 但它**抓不住**「把显式 reject(err) 换回等价的 req.destroy(err)」——
+    //      因为在 Node 22 / 24 上 `req.destroy(err)` **本身就会 reject**，
+    //      两种写法行为一样 ⇒ 这条用例照样绿。
+    //    ⇒ 所以它保护的是「**必须 reject，且错误要能说清是超上限**」，
+    //      不是「只有显式 reject 才不悬挂」。
+    //      （显式 reject 是双保险：它保证在 `destroy(err)` 不派发的实现/版本上也不悬挂。）
     const srv = await startServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         // 分块慢慢吐，模拟「响应已经开始流式返回」的情形 ——
