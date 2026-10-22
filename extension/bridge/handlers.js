@@ -506,6 +506,12 @@ function createHandlers(ctx) {
             return { error: `资源 "${url}" 的 .meta 解析失败` };
         }
         if (!uuid) return { error: `资源 "${url}" 的 .meta 里没有 uuid` };
+        // ⚠️ .meta 是**用户可编辑的文件** —— 里面的 uuid 必须校验。
+        //    不校验的话，一个塞了 "../../.." 的 uuid 会让库文件路径跳出
+        //    <工程>/library/，变成「探测项目外文件是否存在」的信息泄露。
+        if (!isUuidLike(uuid)) {
+            return { error: `资源 "${url}" 的 .meta 里 uuid 不合法："${uuid}"` };
+        }
         return { uuid };
     }
 

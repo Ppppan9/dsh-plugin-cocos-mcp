@@ -418,6 +418,37 @@ test('按 uuid 查节点时**不查场景树**（避开树未重建的竞态）'
     resetSceneHealth();
 });
 
+test('.meta 里的 uuid 必须合法（防止库文件路径跳出 library/）', async () => {
+    // ⚠️ .meta 是**用户可编辑的文件**。里面的 uuid 若不校验，
+    //    一个塞了 "../../.." 的 uuid 会让库文件路径跳出 <工程>/library/，
+    //    变成「探测项目外文件是否存在」的信息泄露。
+    resetSceneHealth();
+    const fs2 = require('fs');
+    const path2 = require('path');
+    const project = path2.join(os.tmpdir(), '__cocos_mcp_smoke_meta');
+    const assets = path2.join(project, 'assets');
+    fs2.mkdirSync(assets, { recursive: true });
+    const evilMeta = path2.join(assets, 'evil.prefab.meta');
+    fs2.writeFileSync(
+        evilMeta,
+        JSON.stringify({ ver: '1.1.0', importer: 'editor', uuid: '../../../../etc/passwd', files: [] })
+    );
+
+    const ctx = makeCtx({ projectPath: project });
+    const handlers = createHandlers(ctx);
+    const r = await handlers['asset.isImported']({ url: 'db://assets/evil.prefab' });
+    assert.strictEqual(r.imported, false, '非法 uuid 的资源不能被判为已导入');
+    assert.ok(
+        /uuid 不合法/.test(r.reason || ''),
+        `理由要说清是 uuid 不合法：${r.reason}`
+    );
+    assert.ok(
+        !r.libraryFile || r.libraryFile.includes(path2.join('library')),
+        `不应给出越界的库文件路径：${r.libraryFile}`
+    );
+    resetSceneHealth();
+});
+
 test('asset.isImported：库产物存在才算导入完成', async () => {
     const ctx = makeCtx();
     const handlers = createHandlers(ctx);
