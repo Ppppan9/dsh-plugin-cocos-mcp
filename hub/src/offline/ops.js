@@ -1093,6 +1093,34 @@ const OP_PATH_FIELDS = [
 ];
 
 /**
+ * 明确**不是**文件路径的字段（写清楚理由，免得下次又要猜）。
+ *
+ * ⚠️ 这张表和 `OP_PATH_FIELDS` 是一对 ——
+ *    「看起来像路径」的字段必须**二选一**：要么进路径表（要过护栏），
+ *    要么进这张表并写明为什么不是路径。
+ *    两张表都没有 → 一致性测试会报错。
+ *    ⇒ 新增一个带 `prefab` / `asset` 这类字段的 op 时，
+ *      **必须显式表态**，不会「默默地漏掉」。
+ *
+ * 判定用的正则见 test/op-path-fields.test.js
+ * （`/path|file|url|dir|prefab|asset|folder|uri/i`）。
+ * `name` / `target` 不在正则里 —— 它们通常是**节点名或组件名**，不是路径。
+ */
+const NOT_PATH_FIELDS = {
+    'rename-node.name': '节点名，不是路径',
+    'add-node.name': '节点名，不是路径',
+    'clone-node.name': '节点名，不是路径',
+    'add-nested-prefab.name': '新建节点的**名字**，不是路径',
+    'add-nested-prefab.prefabUuid': '资产 uuid —— 内部经资产索引解析成项目内的路径，构造上就安全',
+    'replace-nested-prefab.prefabUuid': '同上',
+    'bulk-set.target': '"node" 或 "component:xxx" —— 节点/组件，不是路径',
+    'offset-curve.path': '动画**通道路径**（如 position.x），不是文件路径',
+    'set-keyframe-value.path': '动画通道路径',
+    'set-curve-channel.path': '动画通道路径',
+    'set-curve-channel.newPath': '动画通道路径',
+};
+
+/**
  * 按表校验 op 里的路径字段（**由数据驱动**，不靠每个 op 自己记得调）。
  *
  * ⚠️ 之前每个 op 在自己的处理函数里手写一行 `assertOpPathAllowed(...)` ——
@@ -1198,4 +1226,5 @@ module.exports = {
     assertOpPathAllowed,
     assertOpPathFields,
     OP_PATH_FIELDS,
+    NOT_PATH_FIELDS,
 };

@@ -27,12 +27,15 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { OP_DEFS } = require('../src/offline/ops');
+const { OP_DEFS, NOT_PATH_FIELDS } = require('../src/offline/ops');
+const { ANIM_OP_DEFS } = require('../src/offline/anim');
 const offline = require('../src/offline/index');
 const { GLOBAL_TOOLS, OP_PATH_FIELDS } = require('../src/tools/global-tools');
 
 /** 字段名里带这些词，就当作「路径类字段」。 */
-const PATHISH = /path|file|url|dir/i;
+// ⚠️ 正则要覆盖将来可能出现的路径类字段名 ——
+//    命中不了的靠「二选一」也兜不住（那只会强制表态，不会自动拦）。
+const PATHISH = /path|file|url|dir|prefab|asset|folder|uri/i;
 
 function tmpdir() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'cocos-mcp-opfields-'));
@@ -80,6 +83,18 @@ function fakeCtx(projectDir) {
     };
 }
 
+/** OP_DEFS + ANIM_OP_DEFS 里**所有**字段（op.field 形式）。 */
+function allDefFields() {
+    const out = [];
+    for (const [op, def] of Object.entries(OP_DEFS)) {
+        for (const f of [...(def.required || []), ...(def.optional || [])]) out.push(`${op}.${f}`);
+    }
+    for (const [op, def] of Object.entries(ANIM_OP_DEFS)) {
+        for (const f of [...(def.required || []), ...(def.optional || [])]) out.push(`${op}.${f}`);
+    }
+    return out;
+}
+
 /** OP_DEFS 里所有路径类字段（op.field 形式）。 */
 function pathishFields() {
     const out = [];
@@ -88,26 +103,42 @@ function pathishFields() {
             if (PATHISH.test(field)) out.push(`${opName}.${field}`);
         }
     }
+    for (const [opName, def] of Object.entries(ANIM_OP_DEFS)) {
+        for (const field of [...(def.required || []), ...(def.optional || [])]) {
+            if (PATHISH.test(field)) out.push(`${opName}.${field}`);
+        }
+    }
     return out;
 }
 
-test('★ OP_PATH_FIELDS 必须覆盖 OP_DEFS 里所有路径类字段（漏了就复现「看着有、其实没有」）', () => {
+test('★ 「看起来像路径」的字段必须**显式表态**：要么进路径表，要么进「明确不是路径」表', () => {
+    // ⚠️ 这一条治的是「新增一个带 `prefab` / `asset` 这类字段的 op，
+    //    忘了加进白名单 → 护栏对新 op 静默失效」——
+    //    靠字段名正则自动推导是**兜不住**的（正则命中不了的名字就是命中不了）。
+    //    ⇒ 改成**二选一**：不在路径表里，就必须进 NOT_PATH_FIELDS 并写明理由。
+    //    新增 op 时测试会逼着人做一次表态。
     const pathish = pathishFields();
     const listed = new Set(OP_PATH_FIELDS.map((r) => `${r.op}.${r.field}`));
+    const notPath = new Set(Object.keys(NOT_PATH_FIELDS));
     for (const key of pathish) {
         assert.ok(
-            listed.has(key),
-            `OP_PATH_FIELDS 漏了 "${key}" —— 新增带路径字段的 op 时必须同时加进白名单，` +
-            '否则那道护栏对新 op 完全不生效（且没有任何报错）。'
+            listed.has(key) || notPath.has(key),
+            `"${key}" 既不在 OP_PATH_FIELDS（要过目录护栏），也不在 NOT_PATH_FIELDS（要写明为什么不是路径）` +
+            ' —— 新增带这类字段的 op 时必须显式表态，否则护栏会静默失效。'
         );
     }
-    // 反向：白名单里不能有 OP_DEFS 中不存在的项 ——
-    // 拼错的 op 名/字段名会让白名单**空转**（看起来在守，实际什么都没守）。
+    // 反向：两张表里都不能有 OP_DEFS 中不存在的项 ——
+    // 拼错的 op 名/字段名会让规则**空转**（看起来在守，实际什么都没守）。
+    const allDefs = new Set([...pathishFields(), ...allDefFields()]);
     for (const key of listed) {
-        assert.ok(
-            pathish.includes(key),
-            `OP_PATH_FIELDS 里的 "${key}" 在 OP_DEFS 里不存在 —— 白名单拼错了，那条规则永远不会命中。`
-        );
+        assert.ok(allDefs.has(key), `OP_PATH_FIELDS 里的 "${key}" 在 OP_DEFS 里不存在 —— 白名单拼错了。`);
+    }
+    for (const key of notPath) {
+        assert.ok(allDefs.has(key), `NOT_PATH_FIELDS 里的 "${key}" 在 OP_DEFS 里不存在 —— 这条注释已过时。`);
+    }
+    // NOT_PATH_FIELDS 每条都要写明理由（空理由等于没表态）
+    for (const [key, why] of Object.entries(NOT_PATH_FIELDS)) {
+        assert.ok(typeof why === 'string' && why.trim().length > 0, `NOT_PATH_FIELDS["${key}"] 必须写明理由`);
     }
 });
 
