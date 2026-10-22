@@ -18,7 +18,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 
-const { createHandlers, resetSceneHealth } = require('../extension/bridge/handlers');
+const { createHandlers, resetSceneHealth, setSceneHealthThresholds } = require('../extension/bridge/handlers');
 const os = require('os');
 const fs = require('fs');
 
@@ -622,12 +622,17 @@ test('场景频道健康快照：给扩展面板用', async () => {
         },
     });
     const handlers = createHandlers(ctx);
-    await assert.rejects(() => handlers['scene.tree']({}), /场景频道/);
-    await new Promise((r) => setTimeout(r, 8200));
+    await assert.rejects(() => handlers['scene.tree']({}), /暂时无响应|场景频道/);
+    // 持续够久才判死（阈值在测试里调小；TTL 也要调小，
+    // 否则窗口内只会继承上次失败、不会重新探活）
+    setSceneHealthThresholds({ deadAfterMs: 50, ttlMs: 20, healthTimeoutMs: 50 });
+    await new Promise((r) => setTimeout(r, 120));
     await assert.rejects(() => handlers['scene.tree']({}), /场景频道不可用/);
+    setSceneHealthThresholds({ maxFailures: 2, deadAfterMs: 180000, ttlMs: 8000, healthTimeoutMs: 8000 });
     const snap2 = sceneHealthSnapshot();
     assert.strictEqual(snap2.dead, true, '判死后快照要显示中毒');
     resetSceneHealth();
+    setSceneHealthThresholds({ maxFailures: 2, deadAfterMs: 180000 });
 });
 
 // ──────────────────── 场景频道健康闸门 ────────────────────
@@ -663,18 +668,27 @@ test('场景频道卡死时，场景操作**快速失败**而不是干等到超�
     // 第一次失败只是「响应异常」，还不能判死（编辑器正忙时会这样）
     await assert.rejects(
         () => handlers['scene.tree']({}),
-        /场景频道响应异常/,
-        '第一次探活失败应报「响应异常」而不是直接判死'
+        /暂时无响应/,
+        '第一次探活失败应报「暂时无响应」而不是直接判死'
     );
     assert.strictEqual(probeCount, 1, 'TTL 窗口内的后续调用必须继承上次探活结果，不能再发探活');
 
-    // 跨过 TTL 之后再失败一次 → 判死
-    await new Promise((r) => setTimeout(r, 8200));
+    // ⚠️ 暂态 vs 持续：两次失败但持续时间不够 → 只算「暂时无响应」，不判死
+    await assert.rejects(
+        () => handlers['scene.tree']({}),
+        /暂时无响应/,
+        '短暂失败应报「暂时无响应」，而不是直接判死'
+    );
+
+    // 持续够久才判死（阈值/TTL/探活超时都调小，才能在秒级走到那一步）
+    setSceneHealthThresholds({ deadAfterMs: 50, ttlMs: 20, healthTimeoutMs: 50 });
+    await new Promise((r) => setTimeout(r, 150));
     await assert.rejects(
         () => handlers['scene.tree']({}),
         /场景频道不可用/,
-        '两个独立探活轮次都失败后才判死'
+        '持续无响应超过阈值后才判死'
     );
+    setSceneHealthThresholds({ maxFailures: 2, deadAfterMs: 180000, ttlMs: 8000, healthTimeoutMs: 8000 });
 
     // 判死后：立刻失败，不再等探活超时
     const t1 = Date.now();
@@ -745,21 +759,23 @@ test('健康检查偶发失败不判死（编辑器忙的时候不能误锁）',
     // 第一次：报「响应异常」而不是「不可用」—— 关键是没有被误判成频道已死
     await assert.rejects(
         () => handlers['scene.tree']({}),
-        /场景频道响应异常/,
-        '第一次失败应报「响应异常（可重试）」，不能直接判死'
+        /暂时无响应/,
+        '第一次失败应报「暂时无响应（可重试）」，不能直接判死'
     );
     // TTL 窗口内：继承失败，不重复探活，也不升级成「不可用」
     await assert.rejects(
         () => handlers['scene.tree']({}),
-        /场景频道响应异常/,
+        /暂时无响应/,
         'TTL 窗口内应继承上次的失败结果，不升级成判死'
     );
 
     // 跨过 TTL → 重新探活 → 成功 → 恢复正常
-    await new Promise((r) => setTimeout(r, 8200));
+    setSceneHealthThresholds({ ttlMs: 20, healthTimeoutMs: 50 });
+    await new Promise((r) => setTimeout(r, 120));
     const res = await handlers['scene.tree']({});
     assert.ok(res && Array.isArray(res.nodes), '探活恢复后应正常工作，不该把频道锁死');
     resetSceneHealth();
+    setSceneHealthThresholds({ maxFailures: 2, deadAfterMs: 180000, ttlMs: 8000, healthTimeoutMs: 8000 });
 });
 
 test('场景频道健康状态是可恢复的（健康检查通过就不拦）', async () => {

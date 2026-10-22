@@ -190,14 +190,32 @@ const SCENE_DEAD_HINT =
     '清不掉引擎侧卡住的状态（点了也没用）。' +
     '重启之前可以继续用离线 prefab/animation 编辑器。';
 
-/** @type {{dead: boolean, failures: number, lastProbeAt: number, lastProbeError: string|null}} */
-const sceneHealth = { dead: false, failures: 0, lastProbeAt: 0, lastProbeError: null };
+/** @type {{dead: boolean, failures: number, lastProbeAt: number, lastProbeError: string|null, firstFailureAt: number}} */
+const sceneHealth = {
+    dead: false,
+    failures: 0,
+    lastProbeAt: 0,
+    lastProbeError: null,
+    firstFailureAt: 0,
+};
 /** 健康检查结果的缓存时间（毫秒）—— 太频繁会拖慢每一次场景调用。 */
-const SCENE_HEALTH_TTL_MS = 8000;
+let SCENE_HEALTH_TTL_MS = 8000;
 /** 健康检查本身的超时 —— 必须远小于正常操作的超时，才能起到「快速失败」的作用。 */
-const SCENE_HEALTH_TIMEOUT_MS = 8000;
+let SCENE_HEALTH_TIMEOUT_MS = 8000;
 /** 连续失败多少次才判定频道已死（避免编辑器忙的时候误判）。 */
-const SCENE_HEALTH_MAX_FAILURES = 2;
+let SCENE_HEALTH_MAX_FAILURES = 2;
+/**
+ * 「持续无响应多久」才判定为彻底卡死（而不是暂时无响应）。
+ *
+ * ⚠️ 实测：编辑器启动时资产库会做一次 auto refresh（场景进程被重载），
+ *    这期间 `query-dirty` / `query-node-tree` 会**暂时**不响应，
+ *    刷新结束后自己就恢复了（实测 30 秒后一切正常）。
+ *    所以**不能因为两次失败就判死** —— 那会把一个暂态窗口
+ *    变成「整个会话的场景工具全废」。
+ *
+ *    只有持续超过这个时长，才认定为引擎侧真的卡住、必须重启编辑器。
+ */
+let SCENE_HEALTH_DEAD_AFTER_MS = 180000;
 /** 判定已死后，多久允许再探一次（给自愈留机会）。 */
 const SCENE_DEAD_REPROBE_MS = 30000;
 
@@ -256,9 +274,11 @@ async function runHealthProbe(ctx) {
         sceneHealth.dead = false;
         sceneHealth.failures = 0;
         sceneHealth.lastProbeError = null;
+        sceneHealth.firstFailureAt = 0;
         return { ok: true };
     } catch (e) {
         sceneHealth.failures += 1;
+        if (!sceneHealth.firstFailureAt) sceneHealth.firstFailureAt = Date.now();
         return { ok: false, error: e.message, failures: sceneHealth.failures };
     }
 }
@@ -307,9 +327,13 @@ async function assertSceneChannelAlive(ctx) {
     if (res.ok) return;
     sceneHealth.lastProbeError = res.error;
 
-    if (sceneHealth.failures < SCENE_HEALTH_MAX_FAILURES) {
-        // 第一次失败：还不敢判死，但也不能让调用方干等 —— 照常抛可重试的错误
-        throw unhealthyError(res.error);
+    // ⚠️ 暂态 vs 持续：编辑器启动时的 auto refresh 会让场景状态查询**暂时**不响应，
+    //    刷新结束自己就恢复。两次失败就判死 = 把一个几十秒的暂态窗口
+    //    变成「整个会话的场景工具全废」。
+    const lastingMs = sceneHealth.firstFailureAt ? Date.now() - sceneHealth.firstFailureAt : 0;
+    if (sceneHealth.failures < SCENE_HEALTH_MAX_FAILURES || lastingMs < SCENE_HEALTH_DEAD_AFTER_MS) {
+        // 还不敢判死，但也不能让调用方干等 —— 照常抛可重试的错误
+        throw unhealthyError(res.error, lastingMs);
     }
     sceneHealth.dead = true;
     // 分清「编辑器完全没反应」和「编辑器活着、只是场景状态查询坏了」——
@@ -349,10 +373,12 @@ async function diagnoseEditorAlive(ctx) {
 }
 
 /** 探活失败但编辑器其实还活着时的错误。 */
-function unhealthyError(reason) {
+function unhealthyError(reason, lastingMs = 0) {
+    const lasting = lastingMs ? `已持续 ${Math.round(lastingMs / 1000)} 秒` : '刚刚开始';
     const err = new Error(
-        `场景频道响应异常（健康检查失败：${reason}）。` +
-        '编辑器可能正忙（构建 / 批量导入），稍后重试；如果持续失败，重启 Cocos Creator。'
+        `场景频道**暂时无响应**（健康检查失败：${reason}；${lasting}）。` +
+        '编辑器可能正忙（启动时的自动刷新 / 构建 / 批量导入都会这样），稍后重试即可。' +
+        '如果持续好几分钟都没恢复，再重启 Cocos Creator。'
     );
     err.code = 'SCENE_CHANNEL_UNHEALTHY';
     return err;
@@ -1567,11 +1593,30 @@ module.exports = {
      * 仅供测试与「重启 Bridge」使用 —— 生产里状态本来就该跟着编辑器进程走
      * （频道死了就是死了，重启编辑器会重新加载模块，状态自然清零）。
      */
+    /**
+     * 设置健康闸门的阈值。**仅供测试** ——
+     * 「持续多久才算彻底卡死」默认 3 分钟，测试里改成 100ms 才能在秒级覆盖。
+     */
+    setSceneHealthThresholds(opts = {}) {
+        if (opts.maxFailures !== undefined) SCENE_HEALTH_MAX_FAILURES = opts.maxFailures;
+        if (opts.deadAfterMs !== undefined) SCENE_HEALTH_DEAD_AFTER_MS = opts.deadAfterMs;
+        if (opts.ttlMs !== undefined) SCENE_HEALTH_TTL_MS = opts.ttlMs;
+        if (opts.healthTimeoutMs !== undefined) SCENE_HEALTH_TIMEOUT_MS = opts.healthTimeoutMs;
+    },
+    getSceneHealthThresholds() {
+        return {
+            maxFailures: SCENE_HEALTH_MAX_FAILURES,
+            deadAfterMs: SCENE_HEALTH_DEAD_AFTER_MS,
+            ttlMs: SCENE_HEALTH_TTL_MS,
+            healthTimeoutMs: SCENE_HEALTH_TIMEOUT_MS,
+        };
+    },
     resetSceneHealth() {
         sceneHealth.dead = false;
         sceneHealth.failures = 0;
         sceneHealth.lastProbeAt = 0;
         sceneHealth.lastProbeError = null;
+        sceneHealth.firstFailureAt = 0;
         healthProbeInFlight = null;
     },
     /**
