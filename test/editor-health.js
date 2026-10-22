@@ -21,17 +21,12 @@
  *   2 = 环境不可用（编辑器没开 / 频道中毒 / 多实例）—— 不是本项目的 bug
  */
 
-/** 「scene 频道不可用」的精确特征 —— 与 test/tool-smoke.js 用同一套。 */
-const POISON_PATTERNS = [
-    /场景频道\*\*暂时无响应\*\*/,
-    /场景频道已经卡死/,
-];
-
-/** 判断一条错误是不是「频道不可用」。 */
-function isSceneChannelUnusable(text) {
-    const s = String(text || '');
-    return POISON_PATTERNS.some((re) => re.test(s));
-}
+/**
+ * ⚠️ 判据来自**共享模块** `test/smoke-poison.js` ——
+ *    冒烟与本守卫必须用同一套。两边各写一份的话，迟早漂移：
+ *    一边认、一边不认 → 「真机前置守卫说环境没问题，冒烟说整个频道都废了」。
+ */
+const { POISON_PATTERNS, isSceneChannelUnusable } = require('./smoke-poison');
 
 /**
  * 探一次场景频道。

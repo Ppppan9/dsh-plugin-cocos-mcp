@@ -67,3 +67,26 @@ test('★ 特征表本身只有两条（加多了就会误伤）', () => {
     const kinds = new Set(POISON_PATTERNS.map((p) => p.kind));
     assert.deepStrictEqual([...kinds].sort(), ['dead', 'transient'], '两种根因都要能区分');
 });
+
+test('★ 判据只能有**一份**定义（两份各写一份迟早漂移）', () => {
+    // ⚠️ 第 8 轮复审前就是**两份** ——
+    //    tool-smoke.js 改了用共享模块，editor-health.js 却还留着自己的副本。
+    //    两边行为一旦漂移，就会出现「真机前置守卫说环境没问题、
+    //    冒烟却说整个频道都废了」这种自相矛盾。
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const dir = __dirname;
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.js') && !f.endsWith('.test.js'));
+    // 特征正则在**非测试文件**里只能出现在 smoke-poison.js 一处
+    const MARK = '场景频道\\*\\*暂时无响应\\*\\*';
+    const hits = [];
+    for (const f of files) {
+        const src = fs.readFileSync(path.join(dir, f), 'utf8');
+        if (src.includes(MARK)) hits.push(f);
+    }
+    assert.deepStrictEqual(
+        hits,
+        ['smoke-poison.js'],
+        `判据的正则出现在多个文件里：${hits.join(', ')} —— 必须只有 smoke-poison.js 一份`
+    );
+});
