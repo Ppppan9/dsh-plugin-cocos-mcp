@@ -38,16 +38,19 @@ function findDuplicateKeys(src) {
         if (!inProps) {
             if (/properties:\s*\{\s*$/.test(line)) {
                 inProps = true;
-                depth = 1;
+                depth = 1; // properties 对象内部的深度
                 startLine = i + 1;
                 seen = new Map();
             }
             continue;
         }
-        depth += countBraces(line);
-        // 本行的顶层 key（缩进 = properties 块内第一层）
+        // ⚠️ 深度必须用**这一行开始前**的值。
+        //    `position: {` 这种「跨行展开」的行会把深度从 1 推到 2 ——
+        //    如果先更新深度再匹配 key，这一行自己就不算「第一层 key」→
+        //    **跨行形态的重复 key 全部漏检**（而这恰恰是写 schema 时最常见的形态）。
+        const depthBefore = depth;
         const m = line.match(/^ {16}([A-Za-z_][A-Za-z0-9_]*):/);
-        if (m && depth === 1) {
+        if (m && depthBefore === 1) {
             const key = m[1];
             if (seen.has(key)) {
                 dupes.push({
@@ -60,6 +63,7 @@ function findDuplicateKeys(src) {
                 seen.set(key, i + 1);
             }
         }
+        depth += countBraces(line);
         if (depth <= 0) {
             inProps = false;
         }

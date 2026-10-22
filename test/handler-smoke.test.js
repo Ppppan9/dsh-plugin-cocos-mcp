@@ -403,18 +403,17 @@ test('Cocos 的短 uuid 字符集必须包含 + 和 /（真实引擎会产出）
     assert.ok(!isUuidLike('short'), '短串不能当 uuid');
 });
 
-test('按 uuid 查节点时**不查场景树**（避开树未重建的竞态）', async () => {
-    // ⚠️ 节点刚建出来时，引擎的场景树可能还没重建 ——
-    //    这时按 uuid 查会「找不到节点」（真机实测，间歇性）。
-    //    uuid 本身就能直接交给引擎，绕开树就没有这个竞态。
+test('按 uuid 查节点：树里没有才回退成「当成 uuid」（兼顾两个场景）', async () => {
+    // ⚠️ 这里要同时覆盖两个相反的需求：
+    //    ① 节点刚建出来、场景树还没重建 → 按 uuid 查必须能用（不能报「找不到节点」）；
+    //    ② ref 其实是个**像 uuid 的节点名** → 必须按名字命中，不能被当成 uuid。
+    //    做法：先查树（名字能命中），查不到再回退成 uuid（①能用）。
     resetSceneHealth();
     const ctx = makeCtx();
     const handlers = createHandlers(ctx);
-    const uuid = 'cbguKOUmRESoTWvkSFxlH+';
+    const uuid = 'cbguKOUmRESoTWvkSFxlH+'; // 树里没有
     const r = await handlers['scene.node']({ node: uuid });
-    assert.ok(r && r.uuid === uuid, 'uuid 形态应被直接采用');
-    const treeCalls = ctx.calls.filter((c) => c[0] === 'scene' && c[1] === 'query-node-tree');
-    assert.strictEqual(treeCalls.length, 0, '按 uuid 查时不应去查场景树');
+    assert.ok(r && r.uuid === uuid, '树里没有的 uuid 形态应被直接采用（不报找不到）');
     resetSceneHealth();
 });
 
@@ -600,6 +599,47 @@ test('scene.close：引擎正常关闭时返回 closed:true', async () => {
     const handlers = createHandlers(ctx);
     const r = await handlers['scene.close']({});
     assert.ok(r && r.closed === true, '正常关闭时返回 closed:true');
+    resetSceneHealth();
+});
+
+test('按 uuid 查节点：不查树的前置快路径会让「像 uuid 的节点名」被劫持', async () => {
+    // ⚠️ 曾经的回归：resolveNode 里有「像 uuid 就直接透传」的前置快路径。
+    //    节点名没有任何字符集限制 —— 一个恰好 22 个 base64 字符的名字
+    //    （"AAAAAAAAAAAAAAAAAAAAAA"）会被当成 uuid 丢给引擎 →
+    //    引擎返回 <unnamed> —— **静默的错误答案**，比报错更危险。
+    //
+    //    正确做法：先查树（名字撞 uuid 也能命中），查不到才回退「当成 uuid」。
+    resetSceneHealth();
+    const ctx = makeCtx();
+    const handlers = createHandlers(ctx);
+
+    // mock 的场景树里有一个名字恰好像 uuid 的节点
+    const NAME = 'AAAAAAAAAAAAAAAAAAAAAA';
+    const uuid = 'child-uuid';
+    const origMsg = ctx.msg;
+    ctx.msg = async (channel, message, ...args) => {
+        if (channel === 'scene' && message === 'query-node-tree') {
+            return {
+                __type__: 'cc.Node',
+                name: 'Scene',
+                uuid: 'root-uuid',
+                children: [{ __type__: 'cc.Node', name: NAME, uuid, children: [] }],
+            };
+        }
+        return origMsg(channel, message, ...args);
+    };
+
+    // 按名字查 → 应该命中树里那个节点，而不是被当成 uuid
+    const r = await handlers['scene.node']({ node: NAME });
+    // 关键：发给引擎的必须是**树里的那个 uuid**，而不是那个「像 uuid 的名字」
+    const qn = ctx.calls.filter((c) => c[0] === 'scene' && c[1] === 'query-node');
+    assert.ok(qn.length > 0, '应该发过 query-node');
+    assert.strictEqual(
+        qn[qn.length - 1][2][0],
+        uuid,
+        '发给引擎的必须是树里那个节点的 uuid，不能把「像 uuid 的名字」原样丢过去'
+    );
+    assert.strictEqual(r.uuid, uuid, '返回的应该是树里那个节点');
     resetSceneHealth();
 });
 

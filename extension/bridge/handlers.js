@@ -414,12 +414,16 @@ function invalidateTree() {
 async function resolveNode(ctx, ref, opts = {}) {
     if (!ref) throw new Error('缺少 node 参数');
 
-    // ⚠️ **uuid 形态直接用，不查场景树** ——
-    //    节点刚建出来时，引擎的场景树可能还没重建（真机实测：建完立刻
-    //    按 uuid 查会「找不到节点」，间歇性发生）。
-    //    而 uuid 本身就能直接交给引擎，绕开树就没有这个竞态。
-    if (opts.trustUuid !== false && isUuidLike(ref)) return String(ref);
-
+    // ⚠️ **先查树、查不到再回退到「当成 uuid」**（末尾那个分支）。
+    //    之前这里有个「像 uuid 就直接透传」的前置快路径，动机是避开
+    //    「节点刚建出来、场景树还没重建 → 按名字查不到」的竞态。
+    //    但它有个致命副作用：**节点名没有任何字符集限制**，
+    //    一个恰好 22 个 base64 字符的名字（"AAAAAAAAAAAAAAAAAAAAAA"）
+    //    会被当成 uuid 直接丢给引擎 → 引擎返回 `<unnamed>` ——
+    //    **静默的错误答案**，比报错更危险（真机实测复现）。
+    //
+    //    现在：先按 uuid/路径/**名字**查树（名字撞 uuid 也能正确命中），
+    //    查不到才回退到「当成 uuid」—— 两种场景都覆盖到了。
     const flat = await getSceneTree(ctx);
     const hits = matchNodes(flat, ref);
     if (hits.length === 1) return hits[0].uuid;
@@ -431,7 +435,28 @@ async function resolveNode(ctx, ref, opts = {}) {
     }
     if (hits.length > 1) return hits[0].uuid;
     // 场景树里没有，但形状像 uuid —— 多半是当前场景之外的节点
-    if (isUuidLike(ref)) return String(ref);
+    if (isUuidLike(ref)) {
+        if (!opts.trustUuid) {
+            // ⚠️ 但它也可能是一个**节点名**（节点名没有任何字符集限制）。
+            //    典型场景：这个节点**刚建出来**，引擎的场景树还没重建 →
+            //    按名字查树查不到 → 直接当成 uuid 丢给引擎 → 引擎返回 `<unnamed>`
+            //    —— **静默的错误答案**，比报错更危险（真机实测复现：
+            //    名字 "AAAAAAAAAAAAAAAAAAAAAA" 按名字查就查不到了）。
+            //    → 等一下、**绕过缓存**重新查一次树（这时通常已重建），再决定。
+            await new Promise((r) => setTimeout(r, 200));
+            invalidateTree();
+            const flat2 = await getSceneTree(ctx);
+            const hits2 = matchNodes(flat2, ref);
+            if (hits2.length === 1) return hits2[0].uuid;
+            if (hits2.length > 1) {
+                throw new Error(
+                    `节点 "${ref}" 匹配到 ${hits2.length} 个：${hits2.map((h) => h.path).join('、')}。` +
+                    '请用完整层级路径或 uuid 精确指定。'
+                );
+            }
+        }
+        return String(ref);
+    }
     {
         const sample = flat.slice(0, 12).map((n) => n.path).join(', ');
         throw new Error(`找不到节点 "${ref}"。当前场景节点示例：${sample || '(空场景)'}`);
@@ -1000,7 +1025,13 @@ function createHandlers(ctx) {
                     const deadline = Date.now() + 800;
                     let applied = false;
                     while (Date.now() < deadline) {
-                        const dump = await send('scene', 'query-node', [uuid]).catch(() => null);
+                        // ⚠️ 回读必须**自带短超时** ——
+                        //    默认的 30s 会把 800ms 的预算拖穿（实测能拖到 30 秒）。
+                        //    频道已经坏掉时，这一步要快速放弃，而不是把整个建节点拖住。
+                        const remaining = Math.max(50, deadline - Date.now());
+                        const dump = await send('scene', 'query-node', [uuid], {
+                            timeoutMs: Math.min(300, remaining),
+                        }).catch(() => null);
                         const p = dump && dump.position && dump.position.value ? dump.position.value : dump && dump.position;
                         if (p && num(p.x) === want.x && num(p.y) === want.y && num(p.z) === want.z) {
                             applied = true;

@@ -420,6 +420,36 @@ test('工具 schema 里没有重复 key（重复会被后写的静默覆盖）',
     assert.deepStrictEqual(problems, [], 'schema 里有重复 key：\n  - ' + problems.join('\n  - '));
 });
 
+test('重复 key 检查器要能抓到「跨行展开」形态（那才是常见形态）', () => {
+    // ⚠️ 之前的实现有个致命漏检：深度在**匹配 key 之前**就更新了，
+    //    于是 `position: {` 这种跨行展开的行，自己就不算「第一层 key」
+    //    → 第一次出现没被记进 seen → 重复也报不出来。
+    //    而跨行展开恰恰是写 schema 时最常见的形态。
+    //    （实测：旧版对真实的「修复前」文件只报出 3 处里的 1 处。）
+    const { findDuplicateKeys } = require('../scripts/check-dup-schema-keys');
+    // ⚠️ 缩进必须和真实文件一致（properties 的第一层 key 是 16 个空格）——
+    //    检查器就是按「第一层缩进 + 深度」判定 key 的。
+    const src = [
+        "const T = () => ({",
+        "    inputSchema: {",
+        "        type: 'object',",
+        "        properties: {",
+        "            parent: { type: 'string' },",
+        "            position: {",
+        "                type: 'object',",
+        "                properties: { x: { type: 'number' } },",
+        "            },",
+        "            name: { type: 'string' },",
+        "            position: { type: 'object' },",
+        "        },",
+        "    },",
+        "});",
+    ].join('\n').replace(/^ {12}(?=[a-zA-Z_])/gm, '                ');
+    const dupes = findDuplicateKeys(src);
+    const keys = dupes.map((d) => d.key).sort();
+    assert.deepStrictEqual(keys, ['position'], '跨行展开的重复 key 必须被抓到');
+});
+
 test('README 的工具清单与实际工具一致', () => {
     const all = [...EDITOR_TOOLS, ...GLOBAL_TOOLS];
     // README 里写的工具数量
