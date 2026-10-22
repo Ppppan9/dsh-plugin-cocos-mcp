@@ -12,6 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const offline = require('../index');
+const { setPath, splitPath } = require('../ops');
 const { compressUUID, decompressUUID, isCompressedUUID, deterministicFileId, deterministicUuid } = require('../id');
 
 // ────────────────────────────── fixture ──────────────────────────────
@@ -653,6 +654,110 @@ test('★ bulk-set 的写入目标与匹配条件分离', () => {
     assert.strictEqual(node._string, undefined, '★ 节点上不应出现 _string');
 });
 
+// ────────────────────────────── 原型链安全 ──────────────────────────────
+
+test('★ 保留路径段必须被拒绝 —— 否则能污染整个进程的原型链', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    writeJson(f, makePrefab());
+    const before = fs.readFileSync(f, 'utf8');
+
+    // 这些段名一旦放行，setPath 会一路走到 Object.prototype 上
+    for (const prop of ['__proto__', 'constructor', 'prototype', '_lpos.__proto__.polluted']) {
+        const r = offline.editPrefab({
+            filePath: f,
+            ops: [{ op: 'set-component-field', node: 'Child', component: 'cc.Label', property: prop, value: 'X' }],
+        });
+        assert.ok(!r.ok, `property="${prop}" 必须被拒绝`);
+        assert.match(r.error, /保留段/, `错误信息要说清是保留段：${r.error}`);
+    }
+
+    // ★ 这才是这条测试真正要守的东西 —— 进程级的原型污染
+    assert.strictEqual({}.polluted, undefined, '★ Object.prototype 被污染了');
+    assert.strictEqual(Object.prototype.polluted, undefined);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, '★ 磁盘不得有任何写入');
+});
+
+test('★ 末段只在原型链上的字段名（toString 等）不得写入', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    writeJson(f, makePrefab());
+    const before = fs.readFileSync(f, 'utf8');
+    const r = offline.editPrefab({
+        filePath: f,
+        ops: [{ op: 'set-component-field', node: 'Child', component: 'cc.Label', property: 'toString', value: 'X' }],
+    });
+    assert.ok(!r.ok, 'toString 只在原型链上，必须被拒绝');
+    assert.match(r.error, /原型链/, r.error);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, '★ 磁盘不得有任何写入');
+});
+
+test('★ bulk-set 的「属性存在」检查不能用 in（原型链上的名字会被放行）', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    writeJson(f, makePrefab());
+    const r = offline.editPrefab({
+        filePath: f,
+        ops: [{
+            op: 'bulk-set',
+            selector: 'byComponent',
+            target: 'component:cc.Label',
+            match: 'cc.Label',
+            property: 'toString',
+            value: 'X',
+        }],
+    });
+    assert.ok(r.ok, r.error);
+    const res = r.data.steps[0].result;
+    assert.strictEqual(res.applied, 0, '★ toString 不是组件自己的字段，必须跳过而不是应用');
+    assert.strictEqual(res.skipped, 2);
+    assert.match(res.skipDetails[0].reason, /没有属性/);
+    // 组件上不得多出 toString 自有字段（引擎不认，但会真的写进磁盘）
+    const after = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const label = after.find((e) => e.__type__ === 'cc.Label' && e.node && e.node.__id__ === 2);
+    assert.ok(label);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(label, 'toString'), false, '★ 不得生成引擎不认的字段');
+});
+
+test('★ 数组末段是下标时要替换元素，不能写成元素上的字符串键', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.prefab');
+    const data = makePrefab();
+    data[4]._items = [{ v: 1 }, { v: 2 }];
+    writeJson(f, data);
+    const r = offline.editPrefab({
+        filePath: f,
+        ops: [{ op: 'set-component-field', node: 'Child', component: 'cc.Label', property: '_items.0', value: { v: 9 } }],
+    });
+    assert.ok(r.ok, r.error);
+    const after = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const label = after.find((e) => e.__type__ === 'cc.Label' && Array.isArray(e._items));
+    assert.deepStrictEqual(label._items, [{ v: 9 }, { v: 2 }], '★ 应替换第 0 个元素，而不是给它加一个 "0" 键');
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(label._items[0], '0'), false);
+});
+
+test('setPath / splitPath 是导出的，直接调用也要守住原型链', () => {
+    assert.throws(() => splitPath('__proto__'), /保留段/);
+    assert.throws(() => splitPath('a.constructor.b'), /保留段/);
+    const o = { a: {} };
+    assert.throws(() => setPath(o, ['a', '__proto__', 'x'], 1), /保留段/);
+    assert.strictEqual({}.x, undefined, '★ 不得污染全局原型');
+    assert.strictEqual(Object.getPrototypeOf(o), Object.prototype, '★ 不得换掉对象的原型');
+    // 正常路径不受影响
+    const o2 = { _lpos: { x: 0 } };
+    assert.strictEqual(setPath(o2, ['_lpos', 'x'], 5), true);
+    assert.strictEqual(o2._lpos.x, 5);
+});
+
+test('setPath 不得穿过继承来的对象（模块是可复用的，要纵深防御）', () => {
+    // 原型上挂了一个**普通对象** —— 不是函数，所以 isPlainObject 会放行，
+    // 不加自有属性检查就会一路写进去，改到原型上的共享对象。
+    const proto = { nested: { v: 1 } };
+    const o = Object.create(proto);
+    assert.throws(() => setPath(o, ['nested', 'v'], 999), /原型链/);
+    assert.strictEqual(proto.nested.v, 1, '★ 不得改到原型上的共享对象');
+});
+
 test('★ reparent 必须同步 _parent 并让同批次后续步骤能用新路径', () => {
     const dir = tmpdir();
     const f = path.join(dir, 'a.prefab');
@@ -762,6 +867,37 @@ test('editAnimation 失败时不写盘', () => {
     });
     assert.strictEqual(r.ok, false);
     assert.strictEqual(fs.readFileSync(f, 'utf8'), before, '★ 失败后磁盘必须字节不变');
+});
+
+test('★ editAnimation 也必须过目录白名单（纵深防御：独立复用时不能改项目外的文件）', () => {
+    const allowed = tmpdir();
+    const outside = tmpdir();
+    const f = path.join(outside, 'a.anim');
+    writeJson(f, makeRealAnim());
+    const before = fs.readFileSync(f, 'utf8');
+    const r = offline.editAnimation({
+        filePath: f,
+        allowedRoots: [allowed], // 白名单只指向另一个目录
+        ops: [{ op: 'offset-curve', path: 'Root/Child', offset: 5 }],
+    });
+    assert.strictEqual(r.ok, false, '★ 不在白名单内必须被拒绝');
+    assert.match(r.error, /不在允许的目录范围/, r.error);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, '★ 磁盘必须字节不变');
+});
+
+test('★ editAnimation 显式空白名单 = 拒绝一切（不能退化成「没配就全放行」）', () => {
+    const dir = tmpdir();
+    const f = path.join(dir, 'a.anim');
+    writeJson(f, makeRealAnim());
+    const before = fs.readFileSync(f, 'utf8');
+    const r = offline.editAnimation({
+        filePath: f,
+        allowedRoots: [],
+        ops: [{ op: 'offset-curve', path: 'Root/Child', offset: 5 }],
+    });
+    assert.strictEqual(r.ok, false, '★ 空白名单必须拒绝一切');
+    assert.match(r.error, /白名单为空/, r.error);
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, '★ 磁盘必须字节不变');
 });
 
 // ────────────────────────────── 原子写 ──────────────────────────────

@@ -382,6 +382,7 @@ function findProjectRoot(filePath) {
 
 /** 按点号路径读写对象字段。 */
 function getPath(obj, segments) {
+    assertSafePathSegments(segments, '路径');
     let cur = obj;
     for (const s of segments) {
         if (cur === null || cur === undefined) return undefined;
@@ -400,11 +401,23 @@ function getPath(obj, segments) {
  */
 function setPath(obj, segments, value) {
     if (!segments.length) return false;
+    // 兜底断言 —— setPath 是导出函数，外部直接调用时也要守住原型链。
+    assertSafePathSegments(segments, '路径');
     let cur = obj;
     let i = 0;
     while (i < segments.length - 1) {
         const s = segments[i];
         const next = cur[s];
+        // ⚠️ 往里走之前必须是**自有属性** ——
+        //    继承来的对象（如 Object.prototype）被当成数据容器写进去，
+        //    等于改到了全局共享对象上。保留段已在上面拦掉，这里防的是
+        //    「原型上挂了一个普通对象的」这种更隐蔽的情况。
+        if (next !== undefined && next !== null && !Object.prototype.hasOwnProperty.call(cur, s)) {
+            throw new Error(
+                `路径 "${segments.join('.')}" 的 "${s}" 是从原型链继承来的，不是数据自己的字段，` +
+                '无法安全写入。已中止，未修改任何数据。'
+            );
+        }
         if (Array.isArray(next)) {
             // 数组：下一段是数字下标 —— 要落到**元素**上，不是数组本身
             const idx = segments[i + 1];
@@ -414,9 +427,18 @@ function setPath(obj, segments, value) {
                     '不会修改该数组。'
                 );
             }
-            cur = next[idx];
-            i += 2;
-            continue;
+            // ⚠️ 下标之后**还有**字段 → 落到元素上继续往下走。
+            //    下标本身就是末段（如 "_items.0"）→ 直接替换那个元素。
+            //    之前这里不区分，把末段下标也消费掉了，结果写成
+            //    `arr[0]["0"] = v`（元素上多一个字符串键）——
+            //    报成功，但数据是错的。
+            if (i + 2 < segments.length) {
+                cur = next[idx];
+                i += 2;
+                continue;
+            }
+            next[idx] = value;
+            return true;
         }
         if (isPlainObject(next)) {
             cur = next;
@@ -448,15 +470,57 @@ function setPath(obj, segments, value) {
     if (!isPlainObject(cur)) {
         throw new Error(`路径 "${segments.join('.')}" 的父级不是对象，无法写入。`);
     }
+    // ⚠️ 末段不能是「只存在于原型链上」的名字 ——
+    //    toString / valueOf / hasOwnProperty 这些名字在 Object.prototype 上，
+    //    单段路径不会走进上面的遍历循环，于是直接 `cur[last] = value`
+    //    → 生成一个引擎根本不认的自有字段，**报成功但数据是垃圾**。
+    //    规则很精确：**在对象上存在、但不是它自己的** → 拒绝；
+    //    完全不存在 → 允许新建（那是合法的「加字段」语义）。
+    if (last in cur && !Object.prototype.hasOwnProperty.call(cur, last)) {
+        throw new Error(
+            `路径 "${segments.join('.')}" 的末段 "${last}" 是从原型链继承来的（如 toString / constructor / valueOf），` +
+            '不是数据自己的字段。写入会生成引擎不认的字段。已中止，未修改任何数据。'
+        );
+    }
     cur[last] = value;
     return true;
 }
 
+/**
+ * 会写到原型链上的保留路径段。
+ *
+ * ⚠️ 之前**完全没有**这道闸 ——
+ *    `property: "a.__proto__.x"` 会一路 setPath 走到 Object.prototype 上，
+ *    **污染整个进程**（实测 `({}).x` 变成 "PWNED"，所有对象都中招）。
+ *    `constructor` / `prototype` 同理：
+ *      - `constructor` 会被下面的「属性存在」守卫用 `in` 放行 → 写出自有字段
+ *        → 报 applied:1 但引擎根本不认（典型的「报告成功但零效果」）；
+ *      - `prototype` 是类原型入口。
+ *    prefab 里不可能有这三个字段名，直接拒掉最省事。
+ */
+const RESERVED_PATH_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * 拒绝会写到原型链上的路径段。
+ *
+ * 这是**唯一收口点**：所有用户给的 property 路径都经 splitPath 进来，
+ * 放在这里比在每个 op 里各写一遍可靠得多。
+ */
+function assertSafePathSegments(segments, label) {
+    for (const s of segments) {
+        if (typeof s === 'string' && RESERVED_PATH_SEGMENTS.has(s)) {
+            throw new Error(
+                `${label || '路径'} "${segments.join('.')}" 含保留段 "${s}"。` +
+                '__proto__ / constructor / prototype 会写到原型链上（能污染整个进程），已拒绝。'
+            );
+        }
+    }
+    return segments;
+}
+
 function splitPath(p) {
-    if (Array.isArray(p)) return p.slice();
-    return String(p)
-        .split('.')
-        .map((s) => (/^\d+$/.test(s) ? Number(s) : s));
+    const segs = Array.isArray(p) ? p.slice() : String(p).split('.').map((s) => (/^\d+$/.test(s) ? Number(s) : s));
+    return assertSafePathSegments(segs, '属性路径');
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -967,7 +1031,11 @@ const HANDLERS = {
                 //    序列化字段名带 _ 前缀（_string / _fontSize），
                 //    写成 "string" 会**新建**一个引擎不认的字段，
                 //    报 applied:1 但真字段没变（典型的「报告成功但零效果」）。
-                if (propSegs.length && !(propSegs[0] in comp.element)) {
+                // ⚠️ 必须用 hasOwnProperty 而不是 `in` ——
+                //    `in` 走原型链：'constructor' in el === true，
+                //    于是 constructor/toString/__proto__ 都会被放行，
+                //    写出自有字段却报 applied:1（引擎不认），甚至改掉原型。
+                if (propSegs.length && !Object.prototype.hasOwnProperty.call(comp.element, propSegs[0])) {
                     skipped.push({
                         node: displayName(ctx, idx),
                         reason: `组件 ${targetCompType} 上没有属性 "${op.property}"（序列化字段名带 _ 前缀，如 _string）`,
@@ -976,7 +1044,7 @@ const HANDLERS = {
                 }
                 setPath(comp.element, propSegs, op.value);
             } else {
-                if (propSegs.length && !(propSegs[0] in ctx.data[idx])) {
+                if (propSegs.length && !Object.prototype.hasOwnProperty.call(ctx.data[idx], propSegs[0])) {
                     skipped.push({
                         node: displayName(ctx, idx),
                         reason: `节点上没有属性 "${op.property}"`,
@@ -1078,6 +1146,7 @@ module.exports = {
     getPath,
     setPath,
     splitPath,
+    assertSafePathSegments,
     suggest,
     assertOpPathAllowed,
 };

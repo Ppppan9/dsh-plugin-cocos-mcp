@@ -399,6 +399,14 @@ function editAnimation(args) {
         if (!fs.existsSync(filePath)) return err(`文件不存在：${filePath}`);
         if (!Array.isArray(ops) || !ops.length) return err('ops 必须是非空数组');
 
+        // ⚠️ **.anim 也要过路径护栏** —— 之前只有 editPrefab 有，
+        //    editAnimation 完全没有（纵深防御缺口：独立复用这个模块时，
+        //    就能改到项目外的文件）。语义与 editPrefab 一致：
+        //    null = 不限制（独立 CLI 用），[] = 拒绝一切，非空 = 限定在这些根下。
+        if (Array.isArray(args.allowedRoots)) {
+            assertOpPathAllowed(ctxForGuard(args.allowedRoots), path.resolve(filePath), 'anim 路径');
+        }
+
         const errors = validateOps(ops, ANIM_OP_DEFS);
         if (errors.length) {
             return err(`op 校验未通过（${errors.length} 处）：\n` + errors.map((e) => `  - ${e.message}`).join('\n'));
