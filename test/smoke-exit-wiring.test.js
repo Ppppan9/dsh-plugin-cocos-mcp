@@ -72,6 +72,26 @@ test('★ 频道中毒这个场景**绝不能**退出 0（H1 的核心）', () =
     assert.strictEqual(code, 2);
 });
 
+test('★ 真实调用点必须把 client.close() 作为 cleanup 传进去（漏了会漏进程）', () => {
+    // ⚠️ 真实调用点是 `finish(results, declared, () => client.close())`。
+    //    把那个实参改成 null → 客户端永远不被关掉（CI 上漏进程），
+    //    而**退出码不变**（process.exit 紧跟其后）→ 光看退出码测不出来。
+    //    假客户端 close() 时会往 stderr 打标记，靠它来验。
+    const r = spawnSync(process.execPath, [SMOKE, '--selftest-wire'], { encoding: 'utf8', timeout: 60000 });
+    assert.match(
+        String(r.stderr || ''),
+        /FAKE_CLIENT_CLOSED/,
+        '★ 真实调用点必须把「关客户端」作为 cleanup 传进去'
+    );
+});
+
+test('★ 自测模式必须**最先**执行（挪到 main() 之后会先干等真机）', () => {
+    // 靠「标记是不是第一行」做行为验证，不必解析源码。
+    const r = spawnSync(process.execPath, [SMOKE, '--selftest-exit=0,0,0'], { encoding: 'utf8', timeout: 60000 });
+    const first = String(r.stdout || '').split('\n').map((x) => x.trim()).filter(Boolean)[0];
+    assert.strictEqual(first, 'SELFTEST_EXIT_MODE', '★ 自测模式必须是第一件事（否则会先跑一遍真实流程）');
+});
+
 test('★ 真实流程里那个 finish() 调用不能被删（不然脚本不打印汇总、退出码 0）', () => {
     // ⚠️ 第 8 轮复审实测过的缺口 ——
     //    `--selftest-exit` 直接调 finish() 这个**函数**，

@@ -116,6 +116,10 @@ function makeFakeClient() {
         },
         close() {
             this.closed = true;
+            // ⚠️ 打一个标记 —— 真实调用点如果把 cleanup 实参改成 null，
+            //    客户端就永远不会被关掉（CI 上漏进程）。
+            //    光看退出码测不出来（process.exit 紧跟其后），靠这个标记。
+            process.stderr.write('FAKE_CLIENT_CLOSED\n');
         },
     };
 }

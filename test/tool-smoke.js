@@ -726,6 +726,11 @@ function finish(results, declared, cleanup) {
  * ⇒ 测试直接 spawn 本脚本看退出码 —— **接线断了就会红**。
  */
 if (process.argv.some((a) => a.startsWith('--selftest-exit='))) {
+    // ⚠️ 标记必须是**第一行输出** ——
+    //    这块如果被挪到 main() 之后，真实流程会先跑一遍（spawn 真机 hub、
+    //    连不上编辑器 → 干等几十秒）。靠「标记是不是第一行」能行为验证位置，
+    //    不必去解析源码。
+    console.log('SELFTEST_EXIT_MODE');
     const arg = process.argv.find((a) => a.startsWith('--selftest-exit='));
     const [nf, nsk, nlf] = arg.split('=')[1].split(',').map((x) => Number(x) || 0);
     const fake = [];
