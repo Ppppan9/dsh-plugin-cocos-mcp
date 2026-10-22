@@ -801,6 +801,24 @@ test('★ 工具描述不能承诺代码没做的事（node.transform 曾说「�
     assert.match(t.description, /欧拉角/, '描述应说清引擎要的是欧拉角');
 });
 
+test('★ node.create 的描述不能承诺「自动补 UITransform」（那条路径上没有这个逻辑）', () => {
+    // ⚠️ 自动补 UITransform 的逻辑只在 extension/scene.js 的 METHODS.createNode
+    //    （scene.script 走的引擎级路径）里；
+    //    node.create op 走的是 scene:create-node 编辑器消息，**那条路径上没有**。
+    //    模型照描述以为会自动补 → 建出来的 UI 节点缺 UITransform → 设尺寸/锚点失败。
+    const { EDITOR_TOOLS } = require('../hub/src/tools/editor-tools');
+    const t = EDITOR_TOOLS.find((x) => x.name === 'node.create');
+    assert.ok(t, 'node.create 必须存在');
+    // ⚠️ 判据用**具体的假命题** —— 正确写法里也会出现「自动补 UITransform」
+    //    作为**否定**（"**不会**自动补"），那是提醒，不是承诺。
+    assert.ok(
+        !/会自动补\s*UITransform/.test(t.description),
+        'node.create 的描述不能承诺「会自动补 UITransform」—— 那条路径上没有这个逻辑'
+    );
+    assert.match(t.description, /不会[^\n]*UITransform/, '描述应明确说明不会自动补');
+    assert.match(t.description, /components/, '描述应提示显式传 components');
+});
+
 test('★ 资源类 op 必须都过 requireAssetUrl（asset.copy 曾是同族里唯一的例外）', () => {
     // ⚠️ 同族的 move/create/save/delete 都过 requireAssetUrl，
     //    只有 copy 没有 —— 等于把「复制任意路径」的能力透给模型。

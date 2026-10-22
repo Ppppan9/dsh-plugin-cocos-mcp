@@ -368,7 +368,9 @@ const EDITOR_TOOLS = [
         description:
             '在父节点下创建子节点。parent 可传 uuid / 层级路径 / 名字。\n' +
             'components 可批量挂组件（如 ["cc.UITransform","cc.Label"]）。\n' +
-            'position 传 {x,y,z}，在 UI 父节点下会自动补 UITransform。',
+            'position 传 {x,y,z}。\n' +
+                        '⚠️ **不会**自动补 UITransform —— UI 节点请显式传 components: ["cc.UITransform"]，\n' +
+                        '   否则建出来的节点缺 UITransform，后续设尺寸/锚点会失败。',
         inputSchema: {
             type: 'object',
             properties: {
@@ -816,13 +818,14 @@ const EDITOR_TOOLS = [
         title: '发起构建',
         description:
             '发起一次构建任务。platform 如 "web-desktop" / "web-mobile" / "android"。\n' +
-            'shouldWait 默认 true（等构建完成再返回，结果更确定，但耗时更长）。',
+            'shouldWait 默认 **false**（异步发起，立刻返回；用 build.status 轮询进度）。\n' +
+                        '   传 true 会一直占着连接等构建结束（可能好几分钟），也会撞上客户端超时。',
         inputSchema: {
             type: 'object',
             properties: {
                 platform: { type: 'string', description: '如 web-desktop' },
                 options: { type: 'object', description: '构建配置，缺省用编辑器里保存的配置' },
-                shouldWait: { type: 'boolean', description: '是否等待完成，默认 true' },
+                shouldWait: { type: 'boolean', description: '是否等待构建完成，默认 false（异步）' },
             },
             required: ['platform'],
         },
@@ -832,7 +835,10 @@ const EDITOR_TOOLS = [
     }),
     T('build.platforms', {
         title: '可构建平台',
-        description: '列出当前工程可用的构建平台与配置（web-desktop / web-mobile / android / ios …）。构建前先查这里。',
+        description:
+            '列出当前工程可用的构建平台与配置。\n' +
+            '⚠️ 逐个平台查询编辑器（web-desktop / web-mobile / android / ios），只返回查得到的那些。\n' +
+            '构建前先查这里 —— 别猜平台名。',
         inputSchema: {
             type: 'object',
             properties: { platform: { type: 'string', description: '可选，指定平台；不传则列出全部' } },

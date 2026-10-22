@@ -1432,8 +1432,13 @@ function createHandlers(ctx) {
 
         'build.start': async (args) => {
             req(args, ['platform'], 'build.start');
-            const options = args.options || {};
-            // ⚠️ shouldWait 默认 true 会让这条消息在整个构建期间不返回 ——
+            // ⚠️ **platform 必须真的下传给引擎** ——
+            //    之前它只被 `req()` 校验了一下就丢了，引擎收到的 options 是空的
+            //    ⇒ 实际构建的是编辑器当前配置的平台，而返回值却回显 `platform:"android"`，
+            //    模型据此汇报一个**假结果**。这正是本项目反复要消灭的「假成功」。
+            //    platform 是必填参数，所以它**覆盖** options 里同名键。
+            const options = { ...(args.options || {}), platform: args.platform };
+            // ⚠️ shouldWait 默认 false 会让这条消息在整个构建期间不返回 ——
             //    既占住一个 HTTP 连接（禁用扩展会挂死），也会撞上客户端超时。
             const shouldWait = args.shouldWait === true;
             await send('builder', 'add-task', [options, shouldWait], {
@@ -1443,7 +1448,23 @@ function createHandlers(ctx) {
             return { started: true, platform: args.platform || null, shouldWait };
         },
         'build.status': async (args) => send('builder', 'query-tasks-info', [{ type: args.type || 'build' }]),
-        'build.platforms': async () => send('builder', 'query-platform-config', ['web-desktop']),
+        'build.platforms': async (args) => {
+            // ⚠️ 之前**无视** args.platform、永远只查 web-desktop ——
+            //    而工具描述说「不传则列出全部」。要么改成真列全部，要么改描述 ——
+            //    这里选前者：逐个平台查，只返回查得到的那些（模型据此知道能构建什么）。
+            const known = ['web-desktop', 'web-mobile', 'android', 'ios'];
+            const wanted = args.platform ? [args.platform] : known;
+            const found = [];
+            for (const platform of wanted) {
+                try {
+                    const cfg = await send('builder', 'query-platform-config', [platform], { timeoutMs: 5000 });
+                    found.push({ platform, config: cfg });
+                } catch (_) {
+                    // 这个平台在当前工程不可用（没装对应模块 / 没配置）—— 跳过即可
+                }
+            }
+            return { platforms: found, count: found.length };
+        },
 
         // ── 场景视图 ──
         'view.gizmo': async (args) => {
