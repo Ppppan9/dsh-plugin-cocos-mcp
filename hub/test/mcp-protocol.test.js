@@ -150,6 +150,59 @@ test('★ 三个 notification 方法带 id 时都要回响应（不能只修一�
     }
 });
 
+test('★ notifications/initialized 带 id 也要回 -32600（不能掉进 default 变成「方法不存在」）', async () => {
+    // ⚠️ 第 11 轮复审 G-1：`notifications/initialized` **漏在**那组 case 之外，
+    //    带 id 时落到 default 分支 → 回 -32601「Method not found」，
+    //    会误导客户端去「找一个叫 notifications/initialized 的方法」。
+    //    它恰恰是 MCP 生命周期里客户端**最可能误带 id** 的那条通知。
+    const { ask, outputs } = makeServer();
+    await ask({ jsonrpc: '2.0', id: 6, method: 'notifications/initialized', params: {} });
+    assert.strictEqual(outputs.length, 1, '★ 必须有响应（不能静默）');
+    assert.strictEqual(outputs[0].id, 6);
+    assert.strictEqual(outputs[0].error.code, -32600, '★ 必须是 Invalid Request，不是「方法不存在」');
+});
+
+test('★ 四个 notification 方法带 id 时行为必须**一致**（不能只修三个）', async () => {
+    const methods = [
+        'notifications/initialized',
+        'notifications/cancelled',
+        'notifications/progress',
+        'notifications/roots/list_changed',
+    ];
+    for (const method of methods) {
+        const { ask, outputs } = makeServer();
+        await ask({ jsonrpc: '2.0', id: 7, method, params: {} });
+        assert.strictEqual(outputs.length, 1, `★ ${method} 带 id 时必须有响应`);
+        assert.strictEqual(outputs[0].error.code, -32600, `★ ${method} 必须是 Invalid Request`);
+    }
+});
+
+test('★ `id: null` 是**带了 id**的请求，必须回响应（不能当成 notification 静默）', async () => {
+    // ⚠️ 第 11 轮复审 G-2：JSON-RPC 2.0 的定义是
+    //    「If it is **not included** it is assumed to be a notification」——
+    //    `id: null` 是**带了** id 成员 ⇒ 它是请求，服务器 MUST 回响应。
+    //    之前 `msg.id === null` 被算作 notification ⇒ 一条响应都不发 ⇒ 客户端静默挂死。
+    //    而 MCP 的 Base Protocol 更进一步：「the ID MUST NOT be null」
+    //    ⇒ 回 -32600（Invalid Request）两边都合规。
+    const { ask, outputs } = makeServer();
+    await ask({ jsonrpc: '2.0', id: null, method: 'ping', params: {} });
+    assert.strictEqual(outputs.length, 1, '★ id:null 必须有响应（静默 = 客户端挂死）');
+    assert.strictEqual(outputs[0].id, null);
+    assert.ok(outputs[0].error, '★ 必须是 JSON-RPC error');
+    assert.strictEqual(outputs[0].error.code, -32600);
+});
+
+test('★ 空批量 [] 必须回**单个** -32600（JSON-RPC 2.0 §6）', async () => {
+    // ⚠️ 第 11 轮复审 G-3：批量分支对空数组遍历 0 次 → 什么都不发。
+    //    规范要求：空数组的批量必须回**单个** Response 对象。
+    const { ask, outputs } = makeServer();
+    await ask([]);
+    assert.strictEqual(outputs.length, 1, '★ 空批量必须回一个响应');
+    assert.ok(!Array.isArray(outputs[0]), '★ 必须回单个对象（不是数组）');
+    assert.strictEqual(outputs[0].id, null);
+    assert.strictEqual(outputs[0].error.code, -32600);
+});
+
 test('★ 结构化兜底：任何方法返回 null 都必须回错误（不能依赖每个 case 自己记得回）', async () => {
     // ⚠️ 上面那几条只覆盖了**已知的**三个 notification 方法。
     //    真正防「将来新增的方法忘了回响应」的是**这一层兜底**：

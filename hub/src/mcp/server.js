@@ -83,6 +83,13 @@ class McpServer {
         }
         // 批量请求
         if (Array.isArray(msg)) {
+            // ⚠️ JSON-RPC 2.0 §6：**空数组**的批量必须回**单个** Response 对象
+            //    （不是空数组、也不是什么都不回）。
+            //    遍历 0 次 → out 为空 → 什么都不发 = 客户端干等 ⇒ 这里显式回一个 Invalid Request。
+            if (!msg.length) {
+                this._send({ jsonrpc: '2.0', id: null, error: { code: JSONRPC_INVALID_REQUEST, message: 'Invalid Request' } });
+                return;
+            }
             const out = [];
             for (const m of msg) {
                 const r = await this._dispatch(m);
@@ -99,7 +106,20 @@ class McpServer {
         if (!msg || msg.jsonrpc !== '2.0' || typeof msg.method !== 'string') {
             return { jsonrpc: '2.0', id: msg && msg.id !== undefined ? msg.id : null, error: { code: JSONRPC_INVALID_REQUEST, message: 'Invalid Request' } };
         }
-        const isNotification = msg.id === undefined || msg.id === null;
+        // ⚠️ 「是不是 Notification」只看 **id 成员在不在**（JSON-RPC 2.0 的字面定义：
+        //    「If it is not included it is assumed to be a notification」）。
+        //    `id: null` 是**带了** id ⇒ 它是请求，服务器 MUST 回响应 ——
+        //    当成通知处理 = 客户端永远等不到回应 = 静默挂死（第 11 轮复审 G-2 实测）。
+        //    而 MCP 的 Base Protocol 更进一步：「the ID MUST NOT be null」
+        //    ⇒ `id: null` 属于**非法请求**，回 -32600 正好两边都合规。
+        const isNotification = msg.id === undefined;
+        if (msg.id === null) {
+            return {
+                jsonrpc: '2.0',
+                id: null,
+                error: { code: JSONRPC_INVALID_REQUEST, message: 'Invalid Request (id must not be null)' },
+            };
+        }
 
         // JSON-RPC 2.0：无 id 的是 Notification，Server MUST NOT reply。
         // 必须在这里**统一收口** —— 逐个方法各写一遍判断，迟早会漏（漏了就会回一个没有 id 的响应）。
@@ -147,8 +167,12 @@ class McpServer {
         switch (msg.method) {
             case 'initialize':
                 return await this._onInitialize(msg);
-            // 注：notifications/initialized 已在统一早退里处理（无 id → return null），
-            // 状态在 _onInitialize 时就置好了，这里不需要分支。
+            // 注：`notifications/initialized` 与下面三个 notification 方法一样，
+            //    **无 id** 时已在统一早退里处理（return null）。
+            //    **带 id** 时必须回错误（它就是一个「不该带 id 的请求」）。
+            //    ⚠️ 之前它没被列进下面那组 case → 落到 default 分支 →
+            //    回 -32601「方法不存在」，会误导客户端去「找一个叫 notifications/initialized 的方法」
+            //    （第 11 轮复审 G-1）。四个 notification 方法必须**并列**。
             //
             // ⚠️ `notifications/cancelled` 是**有意忽略**的，不是漏了 ——
             //    MCP 规范里它是 SHOULD（不是 MUST）让接收方中止。
@@ -167,6 +191,7 @@ class McpServer {
             //    回 null ⇒ 客户端会一直等 id 对应的回复 ——
             //    没有错误、没有超时，就是**悬挂**（第 10 轮复审 U-2 实测确认）。
             //    ⇒ 明确回一个 Invalid Request，并把原因说清楚。
+            case 'notifications/initialized':
             case 'notifications/cancelled':
             case 'notifications/progress':
             case 'notifications/roots/list_changed':
